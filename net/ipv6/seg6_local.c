@@ -661,7 +661,7 @@ static struct seg6_action_desc seg6_action_table[] = {
 	},
 	{
 		.action		= SEG6_LOCAL_ACTION_END_AM_E,
-		.attrs		= (1 << SEG6_LOCAL_OIF || 1 << SEG6_LOCAL_MAC),
+		.attrs		= (1 << SEG6_LOCAL_OIF | 1 << SEG6_LOCAL_MAC),
 		.input		= input_action_end_am_e,
 	},
 	{

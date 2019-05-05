@@ -50,6 +50,7 @@ struct bpf_lwt_prog {
 };
 
 struct seg6_local_lwt {
+	struct lwtunnel_state *lwt;	/* parent */
 	int action;
 	struct ipv6_sr_hdr *srh;
 	int table;
@@ -205,9 +206,13 @@ static int input_action_end(struct sk_buff *skb, struct seg6_local_lwt *slwt)
 {
 	struct ipv6_sr_hdr *srh;
 
+	pr_info("%s\n", __func__);
+
 	srh = get_and_validate_srh(skb);
-	if (!srh)
+	if (!srh) {
 		goto drop;
+		pr_info("%s validate failed\n", __func__);
+	}
 
 	advance_nextseg(srh, &ipv6_hdr(skb)->daddr);
 
@@ -225,9 +230,13 @@ static int input_action_end_x(struct sk_buff *skb, struct seg6_local_lwt *slwt)
 {
 	struct ipv6_sr_hdr *srh;
 
+	pr_info("%s\n", __func__);
+
 	srh = get_and_validate_srh(skb);
-	if (!srh)
+	if (!srh) {
+		pr_info("%s validate failed\n", __func__);
 		goto drop;
+	}
 
 	advance_nextseg(srh, &ipv6_hdr(skb)->daddr);
 
@@ -244,13 +253,25 @@ static int input_action_end_t(struct sk_buff *skb, struct seg6_local_lwt *slwt)
 {
 	struct ipv6_sr_hdr *srh;
 
+	pr_info("%s\n", __func__);
+
 	srh = get_and_validate_srh(skb);
-	if (!srh)
+	if (!srh) {
+		pr_info("%s validate failed\n", __func__);
 		goto drop;
+	}
 
 	advance_nextseg(srh, &ipv6_hdr(skb)->daddr);
-
 	seg6_lookup_nexthop(skb, NULL, slwt->table);
+
+	pr_info("%s: daddr is %pI6\n", __func__, &ipv6_hdr(skb)->daddr);
+
+	struct dst_entry *dst = NULL;
+	dst = skb_dst(skb);
+	if (dst && dst->dev) {
+		pr_info("%s: dst ifindex is %s\n", __func__,
+			dst->dev->name);
+	}
 
 	return dst_input(skb);
 
@@ -585,19 +606,104 @@ drop:
 	return -EINVAL;
 }
 
+int seg6_lookup_nexthop2(struct sk_buff *skb, struct in6_addr *nhaddr,
+			u32 tbl_id)
+{
+	struct net *net = dev_net(skb->dev);
+	struct ipv6hdr *hdr = ipv6_hdr(skb);
+	int flags = RT6_LOOKUP_F_HAS_SADDR;
+	struct dst_entry *dst = NULL;
+	struct rt6_info *rt;
+	struct flowi6 fl6;
+
+	memset(&fl6, 0, sizeof(fl6));
+
+	fl6.flowi6_iif = skb->dev->ifindex;
+	fl6.daddr = nhaddr ? *nhaddr : hdr->daddr;
+	fl6.flowi6_proto = hdr->nexthdr;
+
+	if (nhaddr)
+		fl6.flowi6_flags = FLOWI_FLAG_KNOWN_NH;
+
+	if (!tbl_id) {
+		dst = ip6_route_input_lookup(net, skb->dev, &fl6, skb, flags);
+	} else {
+		struct fib6_table *table;
+
+		table = fib6_get_table(net, tbl_id);
+		if (!table)
+			goto out;
+
+		rt = ip6_pol_route(net, table, 0, &fl6, skb, flags);
+		dst = &rt->dst;
+	}
+
+	if (dst && dst->dev->flags & IFF_LOOPBACK && !dst->error) {
+		dst_release(dst);
+		dst = NULL;
+	}
+
+out:
+	if (!dst) {
+		rt = net->ipv6.ip6_blk_hole_entry;
+		dst = &rt->dst;
+		dst_hold(dst);
+	}
+
+	skb_dst_drop(skb);
+	skb_dst_set(skb, dst);
+	return dst->error;
+}
+
 static int input_action_end_am_i_t(struct sk_buff *skb,
 				   struct seg6_local_lwt *slwt)
 {
+	int ret;
 	struct ipv6_sr_hdr *srh;
+	struct dst_entry *dst = NULL;
+
+	pr_info("%s\n", __func__);
 
 	srh = get_and_validate_srh(skb);
-	if (!srh)
+	if (!srh) {
+		pr_info("%s: get_and_validate_srh failed\n", __func__);
 		goto drop;
+	}
 
 	/* set daddr to segment list[segment left] */
-	ipv6_hdr(skb)->daddr = *(srh->segments + srh->segments_left);
+	ipv6_hdr(skb)->daddr = srh->segments[srh->segments_left];
 
-	seg6_lookup_nexthop(skb, NULL, slwt->table);
+	pr_info("%s: ipv6 daddr is %pI6, segments_left is %u, table is %d\n",
+		__func__, &ipv6_hdr(skb)->daddr, srh->segments_left,
+		slwt->table);
+	if (srh->segments_left > 0) {
+		pr_info("%s: segment_left is %u, -1 segment is %pI6\n",
+			__func__, srh->segments_left,
+			&srh->segments[srh->segments_left - 1]);
+	}
+
+	ret = seg6_lookup_nexthop(skb, NULL, slwt->table);
+	pr_err("%s: seg6_lookup_nexthop() returns %d\n", __func__, ret);
+
+	ret = seg6_lookup_nexthop2(skb, NULL, slwt->table);
+	pr_err("%s: seg6_lookup_nexthop2() returns %d\n", __func__, ret);
+
+	if (ret != 0) {
+		pr_err("%s: seg6_lookup_nexthop2 returns %d. drop\n",
+		       __func__, ret);
+		goto drop;
+	}
+
+	/* check loop */
+	dst = skb_dst(skb);
+	if (dst && dst->lwtstate &&
+	    seg6_local_lwtunnel(dst->lwtstate) == slwt) {
+		/* this is loop ! */
+		net_warn_ratelimited("%s: looping this seg6local route\n",
+				     __func__);
+		goto drop;
+	}
+
 
 	return dst_input(skb);
 
@@ -1093,6 +1199,7 @@ static int seg6_local_build_state(struct nlattr *nla, unsigned int family,
 		return -ENOMEM;
 
 	slwt = seg6_local_lwtunnel(newts);
+	slwt->lwt = newts;
 	slwt->action = nla_get_u32(tb[SEG6_LOCAL_ACTION]);
 
 	err = parse_nla_action(tb, slwt);

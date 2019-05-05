@@ -57,6 +57,7 @@ struct seg6_local_lwt {
 	struct in6_addr nh6;
 	int iif;
 	int oif;
+	u8 mac[ETH_ALEN];
 	struct bpf_lwt_prog bpf;
 
 	int headroom;
@@ -536,6 +537,76 @@ drop:
 	return -EINVAL;
 }
 
+static int input_action_end_am_e(struct sk_buff *skb,
+				 struct seg6_local_lwt *slwt)
+{
+	struct net *net = dev_net(skb->dev);
+	struct ipv6_sr_hdr *srh;
+	struct net_device *odev;
+
+	srh = get_and_validate_srh(skb);
+	if (!srh)
+		goto drop;
+
+	srh->segments_left--;
+
+	/* set daddr to segment list[0] */
+	ipv6_hdr(skb)->daddr = srh->segments[0];
+
+	/* validate, create mac header, and xmit */
+	odev = dev_get_by_index_rcu(net, slwt->oif);
+	if (!odev)
+		goto drop;
+
+	if (odev->type != ARPHRD_ETHER)
+		goto drop;
+
+	if (!(odev->flags & IFF_UP) || !netif_carrier_ok(odev))
+		goto drop;
+
+	skb_orphan(skb);
+
+	if (skb_warn_if_lro(skb))
+		goto drop;
+
+	skb_forward_csum(skb);
+
+	if (skb->len - ETH_HLEN > odev->mtu)
+		goto drop;
+
+	skb->dev = odev;
+
+	dev_hard_header(skb, skb->dev, ETH_P_IPV6, slwt->mac, odev->dev_addr,
+			skb->len);
+	return dev_queue_xmit(skb);
+
+drop:
+	kfree_skb(skb);
+	return -EINVAL;
+}
+
+static int input_action_end_am_i_t(struct sk_buff *skb,
+				   struct seg6_local_lwt *slwt)
+{
+	struct ipv6_sr_hdr *srh;
+
+	srh = get_and_validate_srh(skb);
+	if (!srh)
+		goto drop;
+
+	/* set daddr to segment list[segment left] */
+	ipv6_hdr(skb)->daddr = *(srh->segments + srh->segments_left);
+
+	seg6_lookup_nexthop(skb, NULL, slwt->table);
+
+	return dst_input(skb);
+
+drop:
+	kfree_skb(skb);
+	return -EINVAL;
+}
+
+
 static struct seg6_action_desc seg6_action_table[] = {
 	{
 		.action		= SEG6_LOCAL_ACTION_END,
@@ -588,6 +659,16 @@ static struct seg6_action_desc seg6_action_table[] = {
 		.attrs		= (1 << SEG6_LOCAL_BPF),
 		.input		= input_action_end_bpf,
 	},
+	{
+		.action		= SEG6_LOCAL_ACTION_END_AM_E,
+		.attrs		= (1 << SEG6_LOCAL_OIF || 1 << SEG6_LOCAL_MAC),
+		.input		= input_action_end_am_e,
+	},
+	{
+		.action		= SEG6_LOCAL_ACTION_END_AM_I_T,
+		.attrs		= (1 << SEG6_LOCAL_TABLE),
+		.input		= input_action_end_am_i_t,
+	},
 
 };
 
@@ -633,6 +714,8 @@ static const struct nla_policy seg6_local_policy[SEG6_LOCAL_MAX + 1] = {
 				    .len = sizeof(struct in6_addr) },
 	[SEG6_LOCAL_IIF]	= { .type = NLA_U32 },
 	[SEG6_LOCAL_OIF]	= { .type = NLA_U32 },
+	[SEG6_LOCAL_MAC]	= { .type = NLA_BINARY,
+				    .len = ETH_ALEN },
 	[SEG6_LOCAL_BPF]	= { .type = NLA_NESTED },
 };
 
@@ -809,6 +892,34 @@ static int cmp_nla_oif(struct seg6_local_lwt *a, struct seg6_local_lwt *b)
 	return 0;
 }
 
+static int parse_nla_mac(struct nlattr **attrs, struct seg6_local_lwt *slwt)
+{
+	memcpy(slwt->mac, nla_data(attrs[SEG6_LOCAL_MAC]), ETH_ALEN);
+	pr_info("%s: mac is %02x:%02x:%02x:%02x:%02x:%02x\n",
+		__func__,
+		slwt->mac[0], slwt->mac[1], slwt->mac[2],
+		slwt->mac[3], slwt->mac[4], slwt->mac[5]);
+	return 0;
+}
+
+static int put_nla_mac(struct sk_buff *skb, struct seg6_local_lwt *slwt)
+{
+	struct nlattr *nla;
+
+	nla = nla_reserve(skb, SEG6_LOCAL_MAC, ETH_ALEN);
+	if (!nla)
+		return -EMSGSIZE;
+
+	memcpy(nla_data(nla), &slwt->mac, ETH_ALEN);
+
+	return 0;
+}
+
+static int cmp_nla_mac(struct seg6_local_lwt *a, struct seg6_local_lwt *b)
+{
+	return memcmp(a->mac, b->mac, ETH_ALEN);
+}
+
 #define MAX_PROG_NAME 256
 static const struct nla_policy bpf_prog_policy[SEG6_LOCAL_BPF_PROG_MAX + 1] = {
 	[SEG6_LOCAL_BPF_PROG]	   = { .type = NLA_U32, },
@@ -909,6 +1020,10 @@ static struct seg6_action_param seg6_action_params[SEG6_LOCAL_MAX + 1] = {
 				    .put = put_nla_oif,
 				    .cmp = cmp_nla_oif },
 
+	[SEG6_LOCAL_MAC]	= { .parse = parse_nla_mac,
+				    .put = put_nla_mac,
+				    .cmp = cmp_nla_mac },
+
 	[SEG6_LOCAL_BPF]	= { .parse = parse_nla_bpf,
 				    .put = put_nla_bpf,
 				    .cmp = cmp_nla_bpf },
@@ -921,9 +1036,14 @@ static int parse_nla_action(struct nlattr **attrs, struct seg6_local_lwt *slwt)
 	struct seg6_action_desc *desc;
 	int i, err;
 
+	pr_info("%s\n", __func__);
+
 	desc = __get_action_desc(slwt->action);
-	if (!desc)
+	if (!desc) {
+		pr_info("%s: no action desc for action %d\n",
+			__func__, slwt->action);
 		return -EINVAL;
+	}
 
 	if (!desc->input)
 		return -EOPNOTSUPP;

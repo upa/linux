@@ -25,6 +25,7 @@ enum {
 	SEG6_LOCAL_NH6,
 	SEG6_LOCAL_IIF,
 	SEG6_LOCAL_OIF,
+	SEG6_LOCAL_MAC,
 	SEG6_LOCAL_BPF,
 	__SEG6_LOCAL_MAX,
 };
@@ -62,6 +63,10 @@ enum {
 	SEG6_LOCAL_ACTION_END_AM	= 14,
 	/* custom BPF action */
 	SEG6_LOCAL_ACTION_END_BPF	= 15,
+	/* egress part for End.AM */
+	SEG6_LOCAL_ACTION_END_AM_E      = 16,
+	/* ingress part for End.AM */
+	SEG6_LOCAL_ACTION_END_AM_I_T    = 17,
 
 	__SEG6_LOCAL_ACTION_MAX,
 };

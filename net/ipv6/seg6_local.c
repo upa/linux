@@ -682,6 +682,8 @@ static int input_action_end_am_i_t(struct sk_buff *skb,
 			&srh->segments[srh->segments_left - 1]);
 	}
 
+	skb_scrub_packet(skb, false);
+
 	ret = seg6_lookup_nexthop(skb, NULL, slwt->table);
 	pr_err("%s: seg6_lookup_nexthop() returns %d\n", __func__, ret);
 

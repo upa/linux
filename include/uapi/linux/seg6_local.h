@@ -79,6 +79,10 @@ enum {
 	SEG6_LOCAL_ACTION_END_AM_E      = 16,
 	/* ingress part for End.AM */
 	SEG6_LOCAL_ACTION_END_AM_I_T    = 17,
+	/* egress part for End.AF4 */
+	SEG6_LOCAL_ACTION_END_AF4_E	= 18,
+	/* igress part for End.AF4 */
+	SEG6_LOCAL_ACTION_END_AF4_I_T	= 19,
 
 	__SEG6_LOCAL_ACTION_MAX,
 };

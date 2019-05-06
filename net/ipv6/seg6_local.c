@@ -1263,6 +1263,12 @@ static int seg6_local_get_encap_size(struct lwtunnel_state *lwt)
 	if (attrs & (1 << SEG6_LOCAL_OIF))
 		nlsize += nla_total_size(4);
 
+	if (attrs & (1 << SEG6_LOCAL_MAC))
+		nlsize += nla_total_size(ETH_ALEN);
+
+	if (attrs & (1 << SEG6_LOCAL_ENDFLAVOR))
+		nlsize += nla_total_size(1);
+
 	if (attrs & (1 << SEG6_LOCAL_BPF))
 		nlsize += nla_total_size(sizeof(struct nlattr)) +
 		       nla_total_size(MAX_PROG_NAME) +

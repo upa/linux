@@ -59,6 +59,7 @@ struct seg6_local_lwt {
 	int iif;
 	int oif;
 	u8 mac[ETH_ALEN];
+	u8 endflavor;
 	struct bpf_lwt_prog bpf;
 
 	int headroom;
@@ -201,6 +202,40 @@ out:
 	return dst->error;
 }
 
+static int seg6_local_endflavor(struct sk_buff *skb, struct ipv6_sr_hdr *srh,
+				u8 flavor)
+{
+	int ret = 0;
+	u8 srhlen;
+	u16 plen;
+	struct ipv6hdr *ip6h = ipv6_hdr(skb);
+
+	/* pop srh in accordance with end flavor */
+	switch (flavor) {
+	case SEG6_LOCAL_ENDFLAVOR_PSP:
+		srhlen = (srh->hdrlen + 1) * 8;
+		plen = ntohs(ip6h->payload_len);
+		ip6h->nexthdr = srh->nexthdr;
+		ip6h->payload_len = htons(plen - srhlen);
+		memcpy(srh, ((char *)srh) + srhlen, plen - srhlen);
+		skb_reset_transport_header(skb);
+		break;
+
+	case SEG6_LOCAL_ENDFLAVOR_NONE:
+		ret = 0;
+		break;
+
+	case SEG6_LOCAL_ENDFLAVOR_USP:
+	case SEG6_LOCAL_ENDFLAVOR_USD:
+	default:
+		net_warn_ratelimited("%s: unsupported end flavor %u\n",
+				     __func__, flavor);
+		ret = -ENOTSUPP;
+	}
+
+	return ret;
+}
+
 /* regular endpoint function */
 static int input_action_end(struct sk_buff *skb, struct seg6_local_lwt *slwt)
 {
@@ -215,6 +250,9 @@ static int input_action_end(struct sk_buff *skb, struct seg6_local_lwt *slwt)
 	}
 
 	advance_nextseg(srh, &ipv6_hdr(skb)->daddr);
+	if (srh->segments_left == 0)
+		if (seg6_local_endflavor(skb, srh, slwt->endflavor) < 0)
+			goto drop;
 
 	seg6_lookup_nexthop(skb, NULL, 0);
 
@@ -239,6 +277,9 @@ static int input_action_end_x(struct sk_buff *skb, struct seg6_local_lwt *slwt)
 	}
 
 	advance_nextseg(srh, &ipv6_hdr(skb)->daddr);
+	if (srh->segments_left == 0)
+		if (seg6_local_endflavor(skb, srh, slwt->endflavor) < 0)
+			goto drop;
 
 	seg6_lookup_nexthop(skb, &slwt->nh6, 0);
 
@@ -262,6 +303,10 @@ static int input_action_end_t(struct sk_buff *skb, struct seg6_local_lwt *slwt)
 	}
 
 	advance_nextseg(srh, &ipv6_hdr(skb)->daddr);
+	if (srh->segments_left == 0)
+		if (seg6_local_endflavor(skb, srh, slwt->endflavor) < 0)
+			goto drop;
+
 	seg6_lookup_nexthop(skb, NULL, slwt->table);
 
 	pr_info("%s: daddr is %pI6\n", __func__, &ipv6_hdr(skb)->daddr);
@@ -718,17 +763,19 @@ drop:
 static struct seg6_action_desc seg6_action_table[] = {
 	{
 		.action		= SEG6_LOCAL_ACTION_END,
-		.attrs		= 0,
+		.attrs		= (1 << SEG6_LOCAL_ENDFLAVOR),
 		.input		= input_action_end,
 	},
 	{
 		.action		= SEG6_LOCAL_ACTION_END_X,
-		.attrs		= (1 << SEG6_LOCAL_NH6),
+		.attrs		= (1 << SEG6_LOCAL_NH6 |
+				   1 << SEG6_LOCAL_ENDFLAVOR),
 		.input		= input_action_end_x,
 	},
 	{
 		.action		= SEG6_LOCAL_ACTION_END_T,
-		.attrs		= (1 << SEG6_LOCAL_TABLE),
+		.attrs		= (1 << SEG6_LOCAL_TABLE |
+				   1 << SEG6_LOCAL_ENDFLAVOR),
 		.input		= input_action_end_t,
 	},
 	{
@@ -824,6 +871,7 @@ static const struct nla_policy seg6_local_policy[SEG6_LOCAL_MAX + 1] = {
 	[SEG6_LOCAL_OIF]	= { .type = NLA_U32 },
 	[SEG6_LOCAL_MAC]	= { .type = NLA_BINARY,
 				    .len = ETH_ALEN },
+	[SEG6_LOCAL_ENDFLAVOR]	= { .type = NLA_U8 },
 	[SEG6_LOCAL_BPF]	= { .type = NLA_NESTED },
 };
 
@@ -1028,6 +1076,31 @@ static int cmp_nla_mac(struct seg6_local_lwt *a, struct seg6_local_lwt *b)
 	return memcmp(a->mac, b->mac, ETH_ALEN);
 }
 
+static int parse_nla_endflavor(struct nlattr **attrs,
+			       struct seg6_local_lwt *slwt)
+{
+	slwt->endflavor = nla_get_u8(attrs[SEG6_LOCAL_ENDFLAVOR]);
+
+	return 0;
+}
+
+static int put_nla_endflavor(struct sk_buff *skb, struct seg6_local_lwt *slwt)
+{
+	if (nla_put_u8(skb, SEG6_LOCAL_ENDFLAVOR, slwt->endflavor))
+		return -EMSGSIZE;
+
+	return 0;
+}
+
+static int cmp_nla_endflavor(struct seg6_local_lwt *a,
+			     struct seg6_local_lwt *b)
+{
+	if (a->endflavor != b->endflavor)
+		return 1;
+
+	return 0;
+}
+
 #define MAX_PROG_NAME 256
 static const struct nla_policy bpf_prog_policy[SEG6_LOCAL_BPF_PROG_MAX + 1] = {
 	[SEG6_LOCAL_BPF_PROG]	   = { .type = NLA_U32, },
@@ -1131,6 +1204,10 @@ static struct seg6_action_param seg6_action_params[SEG6_LOCAL_MAX + 1] = {
 	[SEG6_LOCAL_MAC]	= { .parse = parse_nla_mac,
 				    .put = put_nla_mac,
 				    .cmp = cmp_nla_mac },
+
+	[SEG6_LOCAL_ENDFLAVOR]	= { .parse = parse_nla_endflavor,
+				    .put = put_nla_endflavor,
+				    .cmp = cmp_nla_endflavor },
 
 	[SEG6_LOCAL_BPF]	= { .parse = parse_nla_bpf,
 				    .put = put_nla_bpf,

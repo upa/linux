@@ -77,10 +77,11 @@ struct seg6_net {
 	struct net_device *lo;	/* loopback on this netns */
 	/* XXX: netdev for lo in this netns: ip_route_input_slow()
 	 * uses skb->dev for flowi4.flowi4_iif. This causes uninteded
-	 * fib rule match in decapsulation End functions.
+	 * fib rule match in End.Dx functions.
 	 */
 
 	struct hlist_head flow4_table[SEG6_HASH_SIZE];
+	struct timer_list flow4_timer;	/* aging flow4 table */
 };
 
 struct net_device *seg6_net_get_lo(struct seg6_net *snet)
@@ -116,6 +117,10 @@ struct seg6_flow4 {
 	struct in6_addr segments[SEG6_FLOW4_MAX_NSEGS];
 	/* XXX: should consider alignment */
 };
+#define SEG6_FLOW4_LIFETIME		(10 * HZ)
+#define SEG6_FLOW4_AGING_INTERVAL	(1 * HZ)
+
+
 
 static void seg6_flow4_dump(struct seg6_flow4 *f)
 {
@@ -226,13 +231,17 @@ static struct seg6_flow4 *seg6_flow4_find(struct seg6_net *snet,
 	struct hlist_head *head = seg6_flow4_head(snet, f);
 	struct seg6_flow4 *tmp;
 
+	rcu_read_lock();
 	hlist_for_each_entry_rcu(tmp, head, hlist) {
 		if (tmp->ifindex == f->ifindex &&
 		    tmp->protocol == f->protocol &&
 		    tmp->saddr == f->saddr && tmp->daddr == f->daddr &&
-		    tmp->sport == f->sport && tmp->dport == f->dport)
+		    tmp->sport == f->sport && tmp->dport == f->dport) {
+			rcu_read_unlock();
 			return tmp;
+		}
 	}
+	rcu_read_unlock();
 
 	return NULL;
 }
@@ -246,18 +255,52 @@ static void seg6_flow4_free(struct rcu_head *head)
 {
 	struct seg6_flow4 *f = container_of(head, struct seg6_flow4, rcu);
 	kfree(f);
-
-	pr_info("%s\n", __func__);
 }
 
-static void seg6_flow4_del(struct seg6_net *snet, struct seg6_flow4 *f)
+static void seg6_flow4_del(struct seg6_flow4 *f)
 {
 	hlist_del_rcu(&f->hlist);
 	call_rcu(&f->rcu, seg6_flow4_free);
-
-	pr_info("%s\n", __func__);
 }
 
+
+static void seg6_flow4_cleanup(struct timer_list *t)
+{
+	struct seg6_net *snet = from_timer(snet, t, flow4_timer);
+	struct seg6_flow4 *f;
+	struct hlist_node *p, *n;
+	unsigned long timeout;
+	unsigned long next_timer = jiffies + SEG6_FLOW4_AGING_INTERVAL;
+	int h;
+
+	for (h = 0; h < SEG6_HASH_SIZE; h++) {
+		hlist_for_each_safe(p, n, &snet->flow4_table[h]) {
+			f = container_of(p, struct seg6_flow4, hlist);
+			timeout = f->updated + SEG6_FLOW4_LIFETIME;
+
+			if (time_before_eq(timeout, jiffies)) {
+				seg6_flow4_dump_msg(f, "flow4 timeout\n");
+				seg6_flow4_del(f);
+			}
+		}
+	}
+
+	mod_timer(&snet->flow4_timer, next_timer);
+}
+
+static void seg6_flow4_destroy(struct seg6_net *snet)
+{
+	struct hlist_node *p, *n;
+	struct seg6_flow4 *f;
+	int h;
+
+	for (h = 0; h < SEG6_HASH_SIZE; h++) {
+		hlist_for_each_safe(p, n, &snet->flow4_table[h]) {
+			f = container_of(p, struct seg6_flow4, hlist);
+			seg6_flow4_del(f);
+		}
+	}
+}
 
 static __net_init int seg6_init_net(struct net *net)
 {
@@ -268,16 +311,22 @@ static __net_init int seg6_init_net(struct net *net)
 	snet->net = net;
 	snet->lo = NULL;
 
+	timer_setup(&snet->flow4_timer, seg6_flow4_cleanup, TIMER_DEFERRABLE);
+	mod_timer(&snet->flow4_timer, jiffies + SEG6_FLOW4_AGING_INTERVAL);
+
 	return 0;
 }
 
 static __net_exit void seg6_exit_net(struct net *net)
 {
 	struct seg6_net *snet = net_generic(net, seg6_net_id);
-	/* release all seg6_flow4 */
+
+	del_timer_sync(&snet->flow4_timer);
 
 	if (snet->lo)
 		dev_put(snet->lo);
+
+	seg6_flow4_destroy(snet);
 }
 
 static struct pernet_operations seg6_net_ops = {

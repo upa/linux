@@ -119,22 +119,29 @@ struct seg6_flow4 {
 
 static void seg6_flow4_dump(struct seg6_flow4 *f)
 {
-	pr_info("%s\n", __func__);
+	pr_debug("%s\n", __func__);
 	if (!f) {
-		pr_err("%s: f is null!\n", __func__);
+		pr_debug("%s: f is null!\n", __func__);
 		return;
 	}
 
-	pr_info("    ifindex %d\n", f->ifindex);
-	pr_info("    saddr   %pI4\n", &f->saddr);
-	pr_info("    daddr   %pI4\n", &f->daddr);
-	pr_info("    proto   %u\n", f->protocol);;
-	pr_info("    sport   %u\n", ntohs(f->sport));
-	pr_info("    dport   %u\n", ntohs(f->dport));
-	pr_info("    ip6 saddr %pI6\n", &f->ip6h.saddr);
-	pr_info("    ip6 daddr %pI6\n", &f->ip6h.daddr);
-	pr_info("    segmengs[0] %pI6\n", &f->srh.segments[0]);
+	pr_debug("    ifindex %d\n", f->ifindex);
+	pr_debug("    saddr   %pI4\n", &f->saddr);
+	pr_debug("    daddr   %pI4\n", &f->daddr);
+	pr_debug("    proto   %u\n", f->protocol);;
+	pr_debug("    sport   %u\n", ntohs(f->sport));
+	pr_debug("    dport   %u\n", ntohs(f->dport));
+	pr_debug("    ip6 saddr %pI6\n", &f->ip6h.saddr);
+	pr_debug("    ip6 daddr %pI6\n", &f->ip6h.daddr);
+	pr_debug("    segmengs[0] %pI6\n", &f->srh.segments[0]);
 }
+
+#define seg6_flow4_dump_msg(f, fmt, ...)			\
+	do {							\
+		pr_debug("%s: " fmt, __func__, ##__VA_ARGS__);	\
+		seg6_flow4_dump((f));				\
+	} while(0)
+
 
 static inline unsigned int seg6_flow4_hash(struct seg6_flow4 *f)
 {
@@ -163,11 +170,9 @@ static struct seg6_flow4 *seg6_flow4_alloc(void)
 {
 	struct seg6_flow4 *f;
 
-	pr_info("%s\n", __func__);
-
 	f = kmalloc(sizeof(struct seg6_flow4), GFP_ATOMIC);
 	if (!f) {
-		pr_err("%s: failed to malloc" , __func__);
+		net_err_ratelimited("%s: failed to malloc" , __func__);
 		return NULL;
 	}
 	memset(f, 0, sizeof(struct seg6_flow4));
@@ -184,8 +189,6 @@ static int seg6_flow4_make(struct seg6_flow4 *f, struct sk_buff *skb,
 	struct iphdr *iph;
 	struct tcphdr *tcp;
 	struct udphdr *udp;
-
-	pr_info("%s\n", __func__);
 
 	iph = ip_hdr(skb);
 	if (iph->version != 4) {
@@ -223,7 +226,6 @@ static struct seg6_flow4 *seg6_flow4_find(struct seg6_net *snet,
 	struct hlist_head *head = seg6_flow4_head(snet, f);
 	struct seg6_flow4 *tmp;
 
-	pr_info("%s\n", __func__);
 	hlist_for_each_entry_rcu(tmp, head, hlist) {
 		if (tmp->ifindex == f->ifindex &&
 		    tmp->protocol == f->protocol &&
@@ -232,13 +234,11 @@ static struct seg6_flow4 *seg6_flow4_find(struct seg6_net *snet,
 			return tmp;
 	}
 
-	pr_info("%s returns NULL\n", __func__);
 	return NULL;
 }
 
 static void seg6_flow4_add(struct seg6_net *snet, struct seg6_flow4 *f)
 {
-	pr_info("%s\n", __func__);
 	hlist_add_head_rcu(&f->hlist, seg6_flow4_head(snet, f));
 }
 
@@ -246,22 +246,22 @@ static void seg6_flow4_free(struct rcu_head *head)
 {
 	struct seg6_flow4 *f = container_of(head, struct seg6_flow4, rcu);
 	kfree(f);
-	pr_info("%s is called\n", __func__);
+
+	pr_info("%s\n", __func__);
 }
 
 static void seg6_flow4_del(struct seg6_net *snet, struct seg6_flow4 *f)
 {
-	pr_info("%s\n", __func__);
-
 	hlist_del_rcu(&f->hlist);
 	call_rcu(&f->rcu, seg6_flow4_free);
+
+	pr_info("%s\n", __func__);
 }
 
 
 static __net_init int seg6_init_net(struct net *net)
 {
 	struct seg6_net *snet = net_generic(net, seg6_net_id);
-	pr_info("%s\n", __func__);
 
 	__hash_init(snet->flow4_table, SEG6_HASH_SIZE);
 
@@ -627,8 +627,6 @@ static int input_action_end_dx4(struct sk_buff *skb,
 	__be32 nhaddr;
 	int err;
 
-	pr_info("%s\n", __func__);
-
 	if (!decap_and_validate(skb, IPPROTO_IPIP, true))
 		goto drop;
 
@@ -928,24 +926,12 @@ static int input_action_end_af4_e(struct sk_buff *skb,
 
 	ip6h = ipv6_hdr(skb);
 
-	pr_info("%s: before: daddr is %pI6, sleft is %u, first is %u\n",
-		__func__, &ip6h->daddr, srh->segments_left,
-		srh->first_segment);
-
 	advance_nextseg(srh, &ipv6_hdr(skb)->daddr);
-
-	pr_info("%s: after: daddr is %pI6, sleft is %u, first is %u\n",
-		__func__, &ip6h->daddr, srh->segments_left,
-		srh->first_segment);
 
 	/* save latest ipv6hdr and srh */
 	ip6h = ipv6_hdr(skb);
 	memcpy(&s.ip6h, ip6h, sizeof(struct ipv6hdr));
 	memcpy(&s.srh, srh, (srh->hdrlen + 1) << 3);
-
-	pr_info("%s: stored: daddr is %pI6, sleft is %u, first is %u\n",
-		__func__, &s.ip6h.daddr, s.srh.segments_left,
-		s.srh.first_segment);
 
 	/* decap and find flow */
 	if (!decap_and_validate(skb, IPPROTO_IPIP, false))
@@ -956,7 +942,6 @@ static int input_action_end_af4_e(struct sk_buff *skb,
 
 	f = seg6_flow4_find(snet, &s);
 	if (!f) {
-		pr_info("%s: new flow, create and save\n", __func__);
 		/* new ipv4 flow. create and store the flow info */
 		f = seg6_flow4_alloc();
 		if (!f)
@@ -964,20 +949,10 @@ static int input_action_end_af4_e(struct sk_buff *skb,
 
 		memcpy(f, &s, sizeof(s));
 		seg6_flow4_add(snet, f);
-
-		pr_info("%s added flow is\n", __func__);
-		seg6_flow4_dump(f);
+		seg6_flow4_dump_msg(f, "new flow stored\n");
 	} else {
-		pr_info("existing flow, update srh and jiffies\n");
-		/* existing flow. update with the latest ipv6hdr and srh */
 		seg6_flow4_update(f, &s.ip6h, &s.srh);
 	}
-
-
-	pr_info("%s: saved: daddr is %pI6, sleft is %u, first is %u\n",
-		__func__, &f->ip6h.daddr, f->srh.segments_left,
-		f->srh.first_segment);
-
 
 	/* validate, create mac header, and xmit */
 	odev = dev_get_by_index_rcu(net, slwt->oif);
@@ -1022,41 +997,24 @@ static int input_action_end_af4_i_t(struct sk_buff *skb,
 	struct dst_entry *dst;
 	int srhlen, hdrlen, err;
 
-	pr_info("%s\n", __func__);
-
-	/* find flow */
-	pr_info("%s: skb->skb_iff is %d\n", __func__, skb->skb_iif);
-	pr_info("%s: skb->dev is %s\n", __func__, skb->dev->name);
-
 	if (seg6_flow4_make(&s, skb, skb->skb_iif) < 0)
 		goto drop;
 
-	pr_info("%s finding flow is\n", __func__);
-	seg6_flow4_dump(&s);
+	seg6_flow4_dump_msg(&s, "finding flow is\n");
 
 	f = seg6_flow4_find(snet, &s);
-	if (!f) {
-		pr_err("%s: no flow found for %pI4->%pI4",
-		       __func__, &s.saddr, &s.daddr);
+	if (!f)
 		goto drop;
-	}
-
-	pr_info("%s: stored: daddr is %pI6, sleft is %u, first is %u\n",
-		__func__, &f->ip6h.daddr, f->srh.segments_left,
-		f->srh.first_segment);
 
 	seg6_flow4_update(f, NULL, NULL);
-
-	pr_info("%s: stored: daddr is %pI6, sleft is %u, first is %u\n",
-		__func__, &f->ip6h.daddr, f->srh.segments_left,
-		f->srh.first_segment);
+	seg6_flow4_dump_msg(f, "found flow is\n");
 
 	/* encap the packet within the stored ipv6 and sr headers */
 	hdrlen = sizeof(struct ipv6hdr);
 	srhlen = (f->srh.hdrlen + 1) << 3;
 	err = skb_cow_head(skb, srhlen + hdrlen + skb->mac_len);
 	if (unlikely(err)) {
-		pr_err("%s: skb_cow_head error\n", __func__);
+		net_err_ratelimited("%s: skb_cow_head error\n", __func__);
 		goto drop;
 	}
 
@@ -1069,25 +1027,14 @@ static int input_action_end_af4_i_t(struct sk_buff *skb,
 	memcpy(hdr, &f->ip6h, sizeof(struct ipv6hdr));
 	memcpy(srh, &f->srh, srhlen);
 
-	pr_info("%s: daddr is %pI6, sleft is %u, first is %u\n",
-		__func__, &hdr->daddr, srh->segments_left,
-		srh->first_segment);
-
-
 	skb->protocol = htons(ETH_P_IPV6);
 	skb_postpush_rcsum(skb, hdr, hdrlen + srhlen);
 	skb_scrub_packet(skb, true);
 
-	pr_info("%s: daddr is %pI6, sleft is %u, first is %u\n",
-		__func__, &hdr->daddr, srh->segments_left,
-		srh->first_segment);
-
 	/* reroute and xmit the sr packet*/
 	err = seg6_lookup_nexthop(skb, NULL, slwt->table);
-	if (err != 0) {
-		pr_err("%s: seg6_lookup_nexthop %d\n", __func__, err);
+	if (err != 0)
 		goto drop;
-	}
 
 	/* check loop */
 	dst = skb_dst(skb);
@@ -1097,8 +1044,6 @@ static int input_action_end_af4_i_t(struct sk_buff *skb,
 				     __func__);
 		goto drop;
 	}
-
-	pr_info("%s: ok, reachs dst_input()\n", __func__);
 
 	return dst_input(skb);
 
@@ -1584,42 +1529,28 @@ static int parse_nla_action(struct nlattr **attrs, struct seg6_local_lwt *slwt)
 	struct seg6_action_desc *desc;
 	int i, err;
 
-	pr_info("%s\n", __func__);
-
 	desc = __get_action_desc(slwt->action);
 	if (!desc)
 		return -EINVAL;
 
-	pr_info("%s desc exist\n", __func__);
-
 	if (!desc->input)
 		return -EOPNOTSUPP;
-
-	pr_info("%s input exist\n", __func__);
 
 	slwt->desc = desc;
 	slwt->headroom += desc->static_headroom;
 
 	for (i = 0; i < SEG6_LOCAL_MAX + 1; i++) {
 		if (desc->attrs & (1 << i)) {
-			if (!attrs[i]) {
-				pr_info("%s attr %d does not exist\n",
-					__func__, i);
+			if (!attrs[i])
 				return -EINVAL;
-			}
 
 			param = &seg6_action_params[i];
 
 			err = param->parse(attrs, slwt);
-			if (err < 0) {
-				pr_info("%s attr %d parse error\n",
-					__func__, i);
+			if (err < 0)
 				return err;
-			}
 		}
 	}
-
-	pr_info("%s finised\n", __func__);
 
 	return 0;
 }
@@ -1671,8 +1602,6 @@ static int seg6_local_build_state(struct nlattr *nla, unsigned int family,
 	newts->headroom = slwt->headroom;
 
 	*ts = newts;
-
-	pr_info("buildsatte for action %d finished\n", slwt->action);
 
 	return 0;
 

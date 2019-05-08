@@ -27,6 +27,7 @@ enum {
 	SEG6_LOCAL_OIF,
 	SEG6_LOCAL_MAC,
 	SEG6_LOCAL_ENDFLAVOR,
+	SEG6_LOCAL_ARGMASK,
 	SEG6_LOCAL_BPF,
 	__SEG6_LOCAL_MAX,
 };
@@ -83,6 +84,10 @@ enum {
 	SEG6_LOCAL_ACTION_END_AF4_E	= 18,
 	/* igress part for End.AF4 */
 	SEG6_LOCAL_ACTION_END_AF4_I_T	= 19,
+	/* egress part for End.AC */
+	SEG6_LOCAL_ACTION_END_AC_E	= 20,
+	/* ingress part for End.AC */
+	SEG6_LOCAL_ACTION_END_AC_I_T	= 21,
 
 	__SEG6_LOCAL_ACTION_MAX,
 };

@@ -56,6 +56,7 @@ struct seg6_local_lwt {
 	int table;
 	struct in_addr nh4;
 	struct in6_addr nh6;
+	struct in6_addr argmask;
 	int iif;
 	int oif;
 	u8 mac[ETH_ALEN];
@@ -336,6 +337,187 @@ static struct pernet_operations seg6_net_ops = {
 	.size	= sizeof(struct seg6_net),
 };
 
+
+struct seg6_cache {
+	struct hlist_node hlist;	/* seg6_net->cache_table[] */
+	struct rcu_head rcu;
+
+	unsigned long updated;
+
+
+	int ifindex;		/* ifindex of the IN IFACE */
+	__be32 arg;
+
+	/* cached headers information */
+	__be16 prot;		/* ethert type of inner hdr (skb->protocol) */
+#define SEG6_CACHE_MAX_SEGS 16
+	struct ipv6hdr hdr;
+	struct ipv6_sr_hdr srh;
+	struct in6_addr segments[SEG6_CACHE_MAX_SEGS];
+};
+DEFINE_HASHTABLE(seg6_cache_table, SEG6_HASH_BITS);
+
+
+static void seg6_cache_dump(struct seg6_cache *c)
+{
+	if (!c)
+		pr_info("%s: c is null!\n", __func__);
+	if (c->ifindex == 0)
+		pr_info("%s: unused cache\n", __func__);
+
+	pr_info("    ifindex       %d\n", c->ifindex);
+	pr_info("    argument      0x%x\n", ntohl(c->arg));
+	pr_info("    protocol      0x%04x\n", ntohs(c->prot));
+	pr_info("    daddr         %pI6", &c->hdr.daddr);
+	pr_info("    saddr         %pI6", &c->hdr.saddr);
+	pr_info("    segleft       %u\n", c->srh.segments_left);
+	pr_info("    segs[segleft] %pI6\n",
+		 &c->srh.segments[c->srh.segments_left]);
+}
+#define seg6_cache_dump_msg(c, fmt, ...)                        \
+	do {							\
+		pr_info("%s: " fmt, __func__, ##__VA_ARGS__);	\
+		seg6_cache_dump((c));				\
+	} while(0)
+
+static inline unsigned int seg6_cache_hash(__be32 arg, int ifindex,
+					   __be16 prot)
+{
+	__be64 a;
+
+	a = arg;
+	a <<= 16;
+	a |= prot;
+	a <<= 16;
+	a += ifindex;
+
+	return hash_64(a, SEG6_HASH_BITS);
+}
+
+static inline struct hlist_head *seg6_cache_head(__be32 arg, int ifindex,
+						__be16 prot)
+{
+	return &seg6_cache_table[seg6_cache_hash(arg, ifindex, prot)];
+}
+
+static struct seg6_cache *seg6_cache_alloc(__be32 arg, int ifindex,
+					   __be16 prot)
+{
+	struct seg6_cache *c;
+
+	c = kmalloc(sizeof(struct seg6_cache), GFP_ATOMIC);
+	if (!c) {
+		net_err_ratelimited("%s: failed to malloc\n", __func__);
+		return NULL;
+	}
+
+	memset(c, 0, sizeof(struct seg6_cache));
+	c->updated = jiffies;
+	c->ifindex = ifindex;
+	c->arg = arg;
+	c->prot = prot;
+
+	return c;
+}
+
+static struct seg6_cache *seg6_cache_find(__be32 arg, int ifindex,
+					  __be16 prot)
+{
+	struct hlist_head *head = seg6_cache_head(arg, ifindex, prot);
+	struct seg6_cache *found;
+
+	rcu_read_lock();
+	hlist_for_each_entry_rcu(found, head, hlist) {
+		if (found->arg == arg && found->ifindex == ifindex &&
+		    found->prot == prot) {
+			rcu_read_unlock();
+			return found;
+		}
+	}
+	rcu_read_unlock();
+
+	return NULL;
+}
+
+static void seg6_cache_add(struct seg6_cache *c)
+{
+	hlist_add_head_rcu(&c->hlist, seg6_cache_head(c->arg, c->ifindex,
+						      c->prot));
+}
+
+static void seg6_cache_remove(int ifindex)
+{
+	struct hlist_node *p, *n;
+	struct seg6_cache *c;
+	int h;
+
+	/* XXX: Remove cache entries associating the ingress
+	 * interface. If everything properly works, a single End.AC.E
+	 * route uses a single incoming interface that is not used by
+	 * other End.AC.E routes. However, it can accidentally happen
+	 * that multiple End.AC.E routes share a single incoming
+	 * interface. In this case, if an End.AC.E route is deleted,
+	 * associating caches are removed even other End.AC.E routes
+	 * use the caches. Thus, we use RCU to protect cache entries
+	 * from unintended free by multiple routes.
+	 */
+	for (h = 0; h < SEG6_HASH_SIZE; h++) {
+		hlist_for_each_safe(p, n, &seg6_cache_table[h]) {
+			c = container_of(p, struct seg6_cache, hlist);
+			hlist_del_rcu(&c->hlist);
+			kfree_rcu(c, rcu);
+		}
+	}
+}
+
+static inline int extract_shift_bits(struct in6_addr mask)
+{
+	int n, i, len = 0;
+
+	for (n = 15; n >= 0; n--) {
+		for (i = 0; i < 8; i++) {
+			if (!(mask.s6_addr[n] & (0x01 << i))) {
+				len++;
+			} else
+				return len;
+		}
+	}
+
+	/* mask is all 0 */
+	return 0;
+}
+
+static __be32 seg6_extract_arg(struct in6_addr addr, struct in6_addr mask)
+{
+	struct in6_addr buf;
+	__u32 ret;
+	int n, m, skip, len = extract_shift_bits(mask);
+
+	for (n = 0; n < 4; n++)
+		buf.s6_addr32[n] = addr.s6_addr32[n] & mask.s6_addr32[n];
+
+	skip = len >> 3; /* we can skip "skip" bytes */
+	for (n = 0; n < len - (skip << 3); n++) {
+		__u8 a = 0, b = 0;
+
+		for (m = 0; m < 16 - skip; m++) {
+			a = buf.s6_addr[m] & 0x01;
+			buf.s6_addr[m] >>= 1;
+			if (b)
+				buf.s6_addr[m] |= (b << 7);
+			b = a;
+		}
+	}
+
+	/* host byte order */
+	ret = 0;
+	ret |= buf.s6_addr[16 - skip - 4] << 24;
+	ret |= buf.s6_addr[16 - skip - 3] << 16;
+	ret |= buf.s6_addr[16 - skip - 2] << 8;
+	ret |= buf.s6_addr[16 - skip - 1];
+
+	return htonl(ret);
+}
 
 
 static struct seg6_local_lwt *seg6_local_lwtunnel(struct lwtunnel_state *lwt)
@@ -1101,6 +1283,217 @@ drop:
 	return -EINVAL;
 }
 
+static int input_action_end_ac_e(struct sk_buff *skb,
+				 struct seg6_local_lwt *slwt)
+{
+	struct net *net = dev_net(skb->dev);
+	struct iphdr *ip4h;
+	struct ipv6hdr *hdr, *ip6h;
+	struct ipv6_sr_hdr *srh;
+	struct seg6_cache *c;
+	struct net_device *odev;
+	__be16 ethertype;
+	__be32 arg;
+	int protocol;
+
+	pr_info("%s starts\n", __func__);
+
+	srh = get_and_validate_srh(skb);
+	if (!srh)
+		goto drop;
+	if (srh->first_segment > SEG6_CACHE_MAX_SEGS) {
+		net_err_ratelimited("%s: this srh has too many segments! %d\n",
+				    __func__, srh->first_segment);
+		goto drop;
+	}
+
+	/* find cache entry */
+	protocol = srh->nexthdr;
+	switch (protocol) {
+	case IPPROTO_IPIP:
+		ethertype = htons(ETH_P_IP);
+		break;
+
+	case IPPROTO_IPV6:
+		ethertype = htons(ETH_P_IPV6);
+		break;
+	default:
+		net_warn_ratelimited("%s: unsupported nexthdr type %d\n",
+				     __func__, srh->nexthdr);
+		goto drop;
+	}
+
+	hdr = ipv6_hdr(skb);
+	arg = seg6_extract_arg(hdr->daddr, slwt->argmask);
+	c = seg6_cache_find(arg, slwt->iif, ethertype);
+	if (!c) {
+		c = seg6_cache_alloc(arg, slwt->iif, ethertype);
+		if (!c)
+			goto drop;
+		seg6_cache_add(c);
+		seg6_cache_dump_msg(c, "new cache added\n");
+	} else
+		seg6_cache_dump_msg(c, "cache found\n");
+
+
+	/* store headers to cache */
+	advance_nextseg(srh, &hdr->daddr);
+	memcpy(&c->hdr, hdr, sizeof(struct ipv6hdr));
+	memcpy(&c->srh, srh, (srh->hdrlen + 1) << 3);
+	c->updated = jiffies;
+
+	/* decap */
+	if (!decap_and_validate(skb, protocol, false)) {
+		pr_info("%s: decap failed\n", __func__);
+		goto drop;
+	}
+
+	/* store arg */
+	switch (protocol) {
+	case IPPROTO_IPIP:
+		ip4h = ip_hdr(skb);
+		ip4h->tos = ntohl(arg) & 0x000000FF;	/* last 8 bit */
+		ip4h->check = 0;
+		ip4h->check = ip_fast_csum((__u8 *)ip4h, ip4h->ihl);
+		break;
+	case IPPROTO_IPV6:
+		ip6h = ipv6_hdr(skb);
+		ip6h->flow_lbl[0] = (htonl(arg) >> 16) & 0x0000000F;
+		ip6h->flow_lbl[1] = (htonl(arg) >> 8) & 0X000000FF;
+		ip6h->flow_lbl[2] = (htonl(arg)) & 0X000000FF;
+		break;
+	}
+
+	/* validate, create mac header, and xmit */
+	odev = dev_get_by_index_rcu(net, slwt->oif);
+	if (!odev)
+		goto drop;
+
+	if (odev->type != ARPHRD_ETHER)
+		goto drop;
+
+	if (!(odev->flags & IFF_UP) || !netif_carrier_ok(odev))
+		goto drop;
+
+	skb->protocol = ethertype;
+	skb_orphan(skb);
+
+	if (skb_warn_if_lro(skb))
+		goto drop;
+
+	skb_forward_csum(skb);
+
+	if (skb->len - ETH_HLEN > odev->mtu)
+		goto drop;
+
+	skb->dev = odev;
+
+	dev_hard_header(skb, skb->dev, ntohs(ethertype), slwt->mac,
+			odev->dev_addr, skb->len);
+	return dev_queue_xmit(skb);
+drop:
+	kfree_skb(skb);
+	return -EINVAL;
+
+}
+
+static int input_action_end_ac_i_t(struct sk_buff *skb,
+				   struct seg6_local_lwt *slwt)
+{
+	struct seg6_cache *c;
+	struct iphdr *ip4h;
+	struct ipv6hdr *hdr, *ip6h;
+	struct ipv6_sr_hdr *srh;
+	struct dst_entry *dst;
+	int srhlen, hdrlen, err;
+	__be32 arg;
+	__u32 a;
+
+	pr_info("%s starts\n", __func__);
+
+	/* extract arg from tos or flowlabel and restore it */
+	switch (ntohs(skb->protocol)) {
+	case ETH_P_IP:
+		ip4h = ip_hdr(skb);
+		arg = ntohl((__u32)ip4h->tos);
+		ip4h->tos = 0;
+		ip4h->check = 0;
+		ip4h->check = ip_fast_csum((__u8 *)ip4h, ip4h->ihl);
+		break;
+	case ETH_P_IPV6:
+		ip6h = ipv6_hdr(skb);
+		a = 0;
+		a |= (ip6h->flow_lbl[0] & 0x04) << 16;
+		a |= (ip6h->flow_lbl[1]) << 8;
+		a |= (ip6h->flow_lbl[2]);
+		arg = htonl(a);
+		ip6h->flow_lbl[0] = 0;	/* XXX: consider it */
+		ip6h->flow_lbl[1] = 0;
+		ip6h->flow_lbl[2] = 0;
+		break;
+	default:
+		net_warn_ratelimited("%s: unsupported ptorocol 0x%04x\n",
+				     __func__, ntohs(skb->protocol));
+		goto drop;
+	}
+
+	/* find cache entry */
+	c = seg6_cache_find(arg, skb->skb_iif, skb->protocol);
+	if (!c) {
+		pr_err("%s: cache not found for arg 0x%x, ifindex $%d\n",
+		       __func__, arg, skb->skb_iif);
+		goto drop;
+	}
+
+	seg6_cache_dump_msg(c, "cache entry found\n");
+
+	/* encap the packet within the stored ipv6 and sr headers */
+	hdrlen = sizeof(struct ipv6hdr);
+	srhlen = (c->srh.hdrlen + 1) << 3;
+	err = skb_cow_head(skb, srhlen + hdrlen + skb->mac_len);
+	if (unlikely(err)) {
+		net_err_ratelimited("%s: skb_cow_head error\n", __func__);
+		goto drop;
+	}
+
+	skb_push(skb, srhlen + hdrlen);
+	skb_reset_network_header(skb);
+	skb_mac_header_rebuild(skb);
+	hdr = ipv6_hdr(skb);
+	srh = (struct ipv6_sr_hdr *)(hdr + 1);
+
+	memcpy(hdr, &c->hdr, sizeof(struct ipv6hdr));
+	memcpy(srh, &c->srh, srhlen);
+
+	skb->protocol = htons(ETH_P_IPV6);
+	skb_postpush_rcsum(skb, hdr, hdrlen + srhlen);
+	skb_scrub_packet(skb, true);
+
+	pr_info("%s: repair packet done\n", __func__);
+
+	/* reroute and xmit the sr packet*/
+	err = seg6_lookup_nexthop(skb, NULL, slwt->table);
+	if (err != 0)
+		goto drop;
+
+	/* check loop */
+	dst = skb_dst(skb);
+	if (dst && dst->lwtstate &&
+	    seg6_local_lwtunnel(dst->lwtstate) == slwt) {
+		net_warn_ratelimited("%s: looping this seg6local route\n",
+				     __func__);
+		goto drop;
+	}
+
+	pr_info("%s: xmit repaired packet\n", __func__);
+
+	return dst_input(skb);
+
+drop:
+	kfree_skb(skb);
+	return -EINVAL;
+}
+
 static struct seg6_action_desc seg6_action_table[] = {
 	{
 		.action		= SEG6_LOCAL_ACTION_END,
@@ -1179,6 +1572,21 @@ static struct seg6_action_desc seg6_action_table[] = {
 					   sizeof(struct ipv6_sr_hdr) +
 					   (sizeof(struct ipv6hdr) << 3)),
 	},
+	{
+		.action		= SEG6_LOCAL_ACTION_END_AC_E,
+		.attrs		= (1 << SEG6_LOCAL_OIF | 1 << SEG6_LOCAL_IIF |
+				   1 << SEG6_LOCAL_MAC |
+				   1 << SEG6_LOCAL_ARGMASK),
+		.input		= input_action_end_ac_e,
+	},
+	{
+		.action		= SEG6_LOCAL_ACTION_END_AC_I_T,
+		.attrs		= (1 << SEG6_LOCAL_TABLE),
+		.input		= input_action_end_ac_i_t,
+		.static_headroom	= (sizeof(struct ipv6hdr) +
+					   sizeof(struct ipv6_sr_hdr) +
+					   (sizeof(struct ipv6hdr) << 3)),
+	},
 };
 
 static struct seg6_action_desc *__get_action_desc(int action)
@@ -1210,7 +1618,8 @@ static int seg6_local_input(struct sk_buff *skb)
 		goto drop;
 
 	if (skb->protocol == htons(ETH_P_IP) &&
-	    desc->action != SEG6_LOCAL_ACTION_END_AF4_I_T)
+	    desc->action != SEG6_LOCAL_ACTION_END_AF4_I_T &&
+	    desc->action != SEG6_LOCAL_ACTION_END_AC_I_T)
 		goto drop;
 
 	return desc->input(skb, slwt);
@@ -1233,6 +1642,8 @@ static const struct nla_policy seg6_local_policy[SEG6_LOCAL_MAX + 1] = {
 	[SEG6_LOCAL_MAC]	= { .type = NLA_BINARY,
 				    .len = ETH_ALEN },
 	[SEG6_LOCAL_ENDFLAVOR]	= { .type = NLA_U8 },
+	[SEG6_LOCAL_ARGMASK]	= { .type = NLA_BINARY,
+				    .len = sizeof(struct in6_addr) },
 	[SEG6_LOCAL_BPF]	= { .type = NLA_NESTED },
 };
 
@@ -1458,6 +1869,33 @@ static int cmp_nla_endflavor(struct seg6_local_lwt *a,
 	return 0;
 }
 
+static int parse_nla_argmask(struct nlattr **attrs,
+			     struct seg6_local_lwt *slwt)
+{
+	memcpy(&slwt->argmask, nla_data(attrs[SEG6_LOCAL_ARGMASK]),
+	       sizeof(struct in6_addr));
+
+	return 0;
+}
+
+static int put_nla_argmask(struct sk_buff *skb, struct seg6_local_lwt *slwt)
+{
+	struct nlattr *nla;
+
+	nla = nla_reserve(skb, SEG6_LOCAL_ARGMASK, sizeof(struct in6_addr));
+	if (!nla)
+		return -EMSGSIZE;
+
+	memcpy(nla_data(nla), &slwt->argmask, sizeof(struct in6_addr));
+
+	return 0;
+}
+
+static int cmp_nla_argmask(struct seg6_local_lwt *a, struct seg6_local_lwt *b)
+{
+	return memcmp(&a->argmask, &b->argmask, sizeof(struct in6_addr));
+}
+
 #define MAX_PROG_NAME 256
 static const struct nla_policy bpf_prog_policy[SEG6_LOCAL_BPF_PROG_MAX + 1] = {
 	[SEG6_LOCAL_BPF_PROG]	   = { .type = NLA_U32, },
@@ -1566,6 +2004,10 @@ static struct seg6_action_param seg6_action_params[SEG6_LOCAL_MAX + 1] = {
 				    .put = put_nla_endflavor,
 				    .cmp = cmp_nla_endflavor },
 
+	[SEG6_LOCAL_ARGMASK]	= { .parse = parse_nla_argmask,
+				    .put = put_nla_argmask,
+				    .cmp = cmp_nla_argmask },
+
 	[SEG6_LOCAL_BPF]	= { .parse = parse_nla_bpf,
 				    .put = put_nla_bpf,
 				    .cmp = cmp_nla_bpf },
@@ -1635,8 +2077,9 @@ static int seg6_local_build_state(struct nlattr *nla, unsigned int family,
 	slwt->lwt = newts;
 	slwt->action = nla_get_u32(tb[SEG6_LOCAL_ACTION]);
 
-	if (slwt->action != SEG6_LOCAL_ACTION_END_AF4_I_T &&
-	    family == AF_INET) {
+	if (family == AF_INET &&
+	    slwt->action != SEG6_LOCAL_ACTION_END_AF4_I_T &&
+	    slwt->action != SEG6_LOCAL_ACTION_END_AC_I_T) {
 		/* only AF4_I_T allows AF_INET */
 		err = -EINVAL;
 		goto out_free;
@@ -1670,6 +2113,9 @@ static void seg6_local_destroy_state(struct lwtunnel_state *lwt)
 		kfree(slwt->bpf.name);
 		bpf_prog_put(slwt->bpf.prog);
 	}
+
+	if (slwt->action == SEG6_LOCAL_ACTION_END_AC_E)
+		seg6_cache_remove(slwt->iif);
 
 	return;
 }
@@ -1729,6 +2175,9 @@ static int seg6_local_get_encap_size(struct lwtunnel_state *lwt)
 
 	if (attrs & (1 << SEG6_LOCAL_ENDFLAVOR))
 		nlsize += nla_total_size(1);
+
+	if (attrs & (1 << SEG6_LOCAL_ARGMASK))
+		nlsize += nla_total_size(16);
 
 	if (attrs & (1 << SEG6_LOCAL_BPF))
 		nlsize += nla_total_size(sizeof(struct nlattr)) +

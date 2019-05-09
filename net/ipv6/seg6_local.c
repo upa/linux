@@ -339,21 +339,22 @@ static struct pernet_operations seg6_net_ops = {
 
 
 struct seg6_cache {
-	struct hlist_node hlist;	/* seg6_net->cache_table[] */
+	struct hlist_node hlist;	/* seg6_cache_table[] */
 	struct rcu_head rcu;
 
 	unsigned long updated;
 
-
 	int ifindex;		/* ifindex of the IN IFACE */
 	__be32 arg;
 
-	/* cached headers information */
+	/* cached header informations */
 	__be16 prot;		/* ethert type of inner hdr (skb->protocol) */
 #define SEG6_CACHE_MAX_SEGS 16
-	struct ipv6hdr hdr;
-	struct ipv6_sr_hdr srh;
+	struct ipv6hdr hdr;	/* outer ipv6 hdr */
+	struct ipv6_sr_hdr srh;	/* outer sr hdr */
 	struct in6_addr segments[SEG6_CACHE_MAX_SEGS];
+	__u8 tos;		/* inner ipv4 tos */
+	__be32 flowlabel;	/* inner ipv6 flowlabel */
 };
 DEFINE_HASHTABLE(seg6_cache_table, SEG6_HASH_BITS);
 
@@ -1294,6 +1295,7 @@ static int input_action_end_ac_e(struct sk_buff *skb,
 	struct net_device *odev;
 	__be16 ethertype;
 	__be32 arg;
+	u8 tclass;
 	int protocol;
 
 	pr_info("%s starts\n", __func__);
@@ -1348,19 +1350,20 @@ static int input_action_end_ac_e(struct sk_buff *skb,
 		goto drop;
 	}
 
-	/* store arg */
+	/* store arg into tos or flowlabel of inner header */
 	switch (protocol) {
 	case IPPROTO_IPIP:
 		ip4h = ip_hdr(skb);
-		ip4h->tos = ntohl(arg) & 0x000000FF;	/* last 8 bit */
+		c->tos = ip4h->tos;
+		ip4h->tos = ntohl(arg) & 0xFF;
 		ip4h->check = 0;
 		ip4h->check = ip_fast_csum((__u8 *)ip4h, ip4h->ihl);
 		break;
 	case IPPROTO_IPV6:
 		ip6h = ipv6_hdr(skb);
-		ip6h->flow_lbl[0] = (htonl(arg) >> 16) & 0x0000000F;
-		ip6h->flow_lbl[1] = (htonl(arg) >> 8) & 0X000000FF;
-		ip6h->flow_lbl[2] = (htonl(arg)) & 0X000000FF;
+		c->flowlabel = ip6_flowlabel(ip6h);
+		tclass = ip6_tclass(ip6_flowinfo(ip6h));
+		ip6_flow_hdr(ip6h, tclass, arg & htonl(0xFFFFF));
 		break;
 	}
 
@@ -1407,7 +1410,7 @@ static int input_action_end_ac_i_t(struct sk_buff *skb,
 	struct dst_entry *dst;
 	int srhlen, hdrlen, err;
 	__be32 arg;
-	__u32 a;
+	__u8 tclass;
 
 	pr_info("%s starts\n", __func__);
 
@@ -1416,20 +1419,10 @@ static int input_action_end_ac_i_t(struct sk_buff *skb,
 	case ETH_P_IP:
 		ip4h = ip_hdr(skb);
 		arg = ntohl((__u32)ip4h->tos);
-		ip4h->tos = 0;
-		ip4h->check = 0;
-		ip4h->check = ip_fast_csum((__u8 *)ip4h, ip4h->ihl);
 		break;
 	case ETH_P_IPV6:
 		ip6h = ipv6_hdr(skb);
-		a = 0;
-		a |= (ip6h->flow_lbl[0] & 0x04) << 16;
-		a |= (ip6h->flow_lbl[1]) << 8;
-		a |= (ip6h->flow_lbl[2]);
-		arg = htonl(a);
-		ip6h->flow_lbl[0] = 0;	/* XXX: consider it */
-		ip6h->flow_lbl[1] = 0;
-		ip6h->flow_lbl[2] = 0;
+		arg = ip6_flowlabel(ip6h);
 		break;
 	default:
 		net_warn_ratelimited("%s: unsupported ptorocol 0x%04x\n",
@@ -1440,12 +1433,24 @@ static int input_action_end_ac_i_t(struct sk_buff *skb,
 	/* find cache entry */
 	c = seg6_cache_find(arg, skb->skb_iif, skb->protocol);
 	if (!c) {
-		pr_err("%s: cache not found for arg 0x%x, ifindex $%d\n",
-		       __func__, arg, skb->skb_iif);
+		pr_err("%s: cache not found for arg 0x%x, ifindex %d\n",
+		       __func__, ntohl(arg), skb->skb_iif);
 		goto drop;
 	}
-
 	seg6_cache_dump_msg(c, "cache entry found\n");
+
+	/* restore tos or flowlabel */
+	switch(ntohs(skb->protocol)) {
+	case ETH_P_IP:
+		ip4h->tos = c->tos;
+		ip4h->check = 0;
+		ip4h->check = ip_fast_csum((__u8 *)ip4h, ip4h->ihl);
+		break;
+	case ETH_P_IPV6:
+		tclass = ip6_tclass(ip6_flowlabel(ip6h));
+		ip6_flow_hdr(ip6h, tclass, c->flowlabel);
+		break;
+	}
 
 	/* encap the packet within the stored ipv6 and sr headers */
 	hdrlen = sizeof(struct ipv6hdr);

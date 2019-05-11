@@ -21,10 +21,12 @@
 #include <net/netevent.h>
 #include <net/netns/generic.h>
 #include <net/ip6_fib.h>
+#include <net/icmp.h>
 #include <net/route.h>
 #include <net/seg6.h>
 #include <linux/seg6.h>
 #include <linux/seg6_local.h>
+#include <linux/icmpv6.h>
 #include <net/addrconf.h>
 #include <net/ip6_route.h>
 #include <net/dst_cache.h>
@@ -519,6 +521,33 @@ static __be32 seg6_extract_arg(struct in6_addr addr, struct in6_addr mask)
 
 	return htonl(ret);
 }
+
+static int seg6_end_ac_get_arg(struct sk_buff *skb, __be32 *arg)
+{
+	struct iphdr *ip4h;
+	struct ipv6hdr *ip6h;
+	__be32 a = 0;
+	int ret = 0;
+
+	switch (ntohs(skb->protocol)) {
+	case ETH_P_IP:
+		ip4h = ip_hdr(skb);
+		a = ntohl((__u32)ip4h->tos);
+		break;
+	case ETH_P_IPV6:
+		ip6h = ipv6_hdr(skb);
+		a = ip6_flowlabel(ip6h);
+		break;
+	default:
+		net_warn_ratelimited("%s: unsupported ptorocol 0x%04x\n",
+				     __func__, ntohs(skb->protocol));
+		ret = -1;
+	}
+
+	*arg = a;
+	return ret;
+}
+
 
 
 static struct seg6_local_lwt *seg6_local_lwtunnel(struct lwtunnel_state *lwt)
@@ -1414,23 +1443,10 @@ static int input_action_end_ac_i_t(struct sk_buff *skb,
 
 	pr_info("%s starts\n", __func__);
 
-	/* extract arg from tos or flowlabel and restore it */
-	switch (ntohs(skb->protocol)) {
-	case ETH_P_IP:
-		ip4h = ip_hdr(skb);
-		arg = ntohl((__u32)ip4h->tos);
-		break;
-	case ETH_P_IPV6:
-		ip6h = ipv6_hdr(skb);
-		arg = ip6_flowlabel(ip6h);
-		break;
-	default:
-		net_warn_ratelimited("%s: unsupported ptorocol 0x%04x\n",
-				     __func__, ntohs(skb->protocol));
-		goto drop;
-	}
-
 	/* find cache entry */
+	if (seg6_end_ac_get_arg(skb, &arg) < 0)
+		goto drop;
+
 	c = seg6_cache_find(arg, skb->skb_iif, skb->protocol);
 	if (!c) {
 		pr_err("%s: cache not found for arg 0x%x, ifindex %d\n",
@@ -1439,14 +1455,27 @@ static int input_action_end_ac_i_t(struct sk_buff *skb,
 	}
 	seg6_cache_dump_msg(c, "cache entry found\n");
 
-	/* restore tos or flowlabel */
+	/* decrement ttl, and restore tos or flowlabel */
 	switch(ntohs(skb->protocol)) {
 	case ETH_P_IP:
+		ip4h = ip_hdr(skb);
+		if (ip4h->ttl <= 1) {
+			icmp_send(skb, ICMP_TIME_EXCEEDED, ICMP_EXC_TTL, 0);
+			goto drop;
+		}
+		ip4h->ttl--;
 		ip4h->tos = c->tos;
 		ip4h->check = 0;
 		ip4h->check = ip_fast_csum((__u8 *)ip4h, ip4h->ihl);
 		break;
 	case ETH_P_IPV6:
+		ip6h = ipv6_hdr(skb);
+		if (ip6h->hop_limit <= 1) {
+			icmpv6_send(skb, ICMPV6_TIME_EXCEED,
+				    ICMPV6_EXC_HOPLIMIT, 0);
+			goto drop;
+		}
+		ip6h->hop_limit--;
 		tclass = ip6_tclass(ip6_flowlabel(ip6h));
 		ip6_flow_hdr(ip6h, tclass, c->flowlabel);
 		break;

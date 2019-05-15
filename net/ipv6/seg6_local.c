@@ -364,22 +364,22 @@ DEFINE_HASHTABLE(seg6_cache_table, SEG6_HASH_BITS);
 static void seg6_cache_dump(struct seg6_cache *c)
 {
 	if (!c)
-		pr_info("%s: c is null!\n", __func__);
+		pr_debug("%s: c is null!\n", __func__);
 	if (c->ifindex == 0)
-		pr_info("%s: unused cache\n", __func__);
+		pr_debug("%s: unused cache\n", __func__);
 
-	pr_info("    ifindex       %d\n", c->ifindex);
-	pr_info("    argument      0x%x\n", ntohl(c->arg));
-	pr_info("    protocol      0x%04x\n", ntohs(c->prot));
-	pr_info("    daddr         %pI6", &c->hdr.daddr);
-	pr_info("    saddr         %pI6", &c->hdr.saddr);
-	pr_info("    segleft       %u\n", c->srh.segments_left);
-	pr_info("    segs[segleft] %pI6\n",
+	pr_debug("    ifindex       %d\n", c->ifindex);
+	pr_debug("    argument      0x%x\n", ntohl(c->arg));
+	pr_debug("    protocol      0x%04x\n", ntohs(c->prot));
+	pr_debug("    daddr         %pI6", &c->hdr.daddr);
+	pr_debug("    saddr         %pI6", &c->hdr.saddr);
+	pr_debug("    segleft       %u\n", c->srh.segments_left);
+	pr_debug("    segs[segleft] %pI6\n",
 		 &c->srh.segments[c->srh.segments_left]);
 }
 #define seg6_cache_dump_msg(c, fmt, ...)                        \
 	do {							\
-		pr_info("%s: " fmt, __func__, ##__VA_ARGS__);	\
+		pr_debug("%s: " fmt, __func__, ##__VA_ARGS__);	\
 		seg6_cache_dump((c));				\
 	} while(0)
 
@@ -1327,8 +1327,6 @@ static int input_action_end_ac_e(struct sk_buff *skb,
 	u8 tclass;
 	int protocol;
 
-	pr_info("%s starts\n", __func__);
-
 	srh = get_and_validate_srh(skb);
 	if (!srh)
 		goto drop;
@@ -1375,7 +1373,7 @@ static int input_action_end_ac_e(struct sk_buff *skb,
 
 	/* decap */
 	if (!decap_and_validate(skb, protocol, false)) {
-		pr_info("%s: decap failed\n", __func__);
+		pr_debug("%s: decap failed\n", __func__);
 		goto drop;
 	}
 
@@ -1441,16 +1439,15 @@ static int input_action_end_ac_i_t(struct sk_buff *skb,
 	__be32 arg;
 	__u8 tclass;
 
-	pr_info("%s starts\n", __func__);
-
 	/* find cache entry */
 	if (seg6_end_ac_get_arg(skb, &arg) < 0)
 		goto drop;
 
 	c = seg6_cache_find(arg, skb->skb_iif, skb->protocol);
 	if (!c) {
-		pr_err("%s: cache not found for arg 0x%x, ifindex %d\n",
-		       __func__, ntohl(arg), skb->skb_iif);
+		net_warn_ratelimited("%s: cache not found for "
+				     "arg 0x%x, ifindex %d\n",
+				     __func__, ntohl(arg), skb->skb_iif);
 		goto drop;
 	}
 	seg6_cache_dump_msg(c, "cache entry found\n");
@@ -1503,8 +1500,6 @@ static int input_action_end_ac_i_t(struct sk_buff *skb,
 	skb_postpush_rcsum(skb, hdr, hdrlen + srhlen);
 	skb_scrub_packet(skb, true);
 
-	pr_info("%s: repair packet done\n", __func__);
-
 	/* reroute and xmit the sr packet*/
 	err = seg6_lookup_nexthop(skb, NULL, slwt->table);
 	if (err != 0)
@@ -1518,8 +1513,6 @@ static int input_action_end_ac_i_t(struct sk_buff *skb,
 				     __func__);
 		goto drop;
 	}
-
-	pr_info("%s: xmit repaired packet\n", __func__);
 
 	return dst_input(skb);
 

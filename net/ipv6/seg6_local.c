@@ -1435,7 +1435,7 @@ static int input_action_end_ac_i_t(struct sk_buff *skb,
 	struct ipv6hdr *hdr, *ip6h;
 	struct ipv6_sr_hdr *srh;
 	struct dst_entry *dst;
-	int srhlen, hdrlen, err;
+	int srhlen, hdrlen, pktlen, err;
 	__be32 arg;
 	__u8 tclass;
 
@@ -1464,6 +1464,7 @@ static int input_action_end_ac_i_t(struct sk_buff *skb,
 		ip4h->tos = c->tos;
 		ip4h->check = 0;
 		ip4h->check = ip_fast_csum((__u8 *)ip4h, ip4h->ihl);
+		pktlen = ntohs(ip4h->tot_len);
 		break;
 	case ETH_P_IPV6:
 		ip6h = ipv6_hdr(skb);
@@ -1475,7 +1476,10 @@ static int input_action_end_ac_i_t(struct sk_buff *skb,
 		ip6h->hop_limit--;
 		tclass = ip6_tclass(ip6_flowlabel(ip6h));
 		ip6_flow_hdr(ip6h, tclass, c->flowlabel);
+		pktlen = ntohs(ip6h->payload_len) + 40;
 		break;
+	default:
+		goto drop;
 	}
 
 	/* encap the packet within the stored ipv6 and sr headers */
@@ -1491,10 +1495,12 @@ static int input_action_end_ac_i_t(struct sk_buff *skb,
 	skb_reset_network_header(skb);
 	skb_mac_header_rebuild(skb);
 	hdr = ipv6_hdr(skb);
+
 	srh = (struct ipv6_sr_hdr *)(hdr + 1);
 
-	memcpy(hdr, &c->hdr, sizeof(struct ipv6hdr));
 	memcpy(srh, &c->srh, srhlen);
+	memcpy(hdr, &c->hdr, sizeof(struct ipv6hdr));
+	hdr->payload_len = htons(pktlen + srhlen);
 
 	skb->protocol = htons(ETH_P_IPV6);
 	skb_postpush_rcsum(skb, hdr, hdrlen + srhlen);

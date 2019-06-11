@@ -1506,6 +1506,13 @@ static int input_action_end_ac_i_t(struct sk_buff *skb,
 	skb_postpush_rcsum(skb, hdr, hdrlen + srhlen);
 	skb_scrub_packet(skb, true);
 
+	/* handle endflavor:
+	 * XXX: This involves unnecessary memcpy (decap after encap).
+	 */
+	if (srh->segments_left == 0)
+		if (seg6_local_endflavor(skb, srh, slwt->endflavor) < 0)
+			goto drop;
+
 	/* reroute and xmit the sr packet*/
 	err = seg6_lookup_nexthop(skb, NULL, slwt->table);
 	if (err != 0)
@@ -1614,7 +1621,8 @@ static struct seg6_action_desc seg6_action_table[] = {
 	},
 	{
 		.action		= SEG6_LOCAL_ACTION_END_AC_I_T,
-		.attrs		= (1 << SEG6_LOCAL_TABLE),
+		.attrs		= (1 << SEG6_LOCAL_TABLE |
+				   1 << SEG6_LOCAL_ENDFLAVOR),
 		.input		= input_action_end_ac_i_t,
 		.static_headroom	= (sizeof(struct ipv6hdr) +
 					   sizeof(struct ipv6_sr_hdr) +

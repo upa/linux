@@ -452,6 +452,27 @@ drop:
 	return err;
 }
 
+/* masquerading proxy */
+static int input_action_end_am(struct sk_buff *skb,
+			       struct seg6_local_lwt *slwt)
+{
+	struct ipv6hdr *hdr = ipv6_hdr(skb);
+	struct ipv6_sr_hdr *srh;
+
+	srh = get_and_validate_srh(skb);
+	if (!srh)
+		goto drop;
+
+	hdr->daddr = srh->segments[0];
+
+	seg6_lookup_nexthop(skb, &slwt->nh6, slwt->table);
+	return dst_input(skb);
+
+drop:
+	kfree_skb(skb);
+	return -EINVAL;
+}
+
 DEFINE_PER_CPU(struct seg6_bpf_srh_state, seg6_bpf_srh_states);
 
 bool seg6_bpf_has_valid_srh(struct sk_buff *skb)
@@ -577,6 +598,12 @@ static struct seg6_action_desc seg6_action_table[] = {
 		.attrs		= (1 << SEG6_LOCAL_SRH),
 		.input		= input_action_end_b6_encap,
 		.static_headroom	= sizeof(struct ipv6hdr),
+	},
+	{
+		.action		= SEG6_LOCAL_ACTION_END_AM,
+		.attrs		= (1 << SEG6_LOCAL_NH6 |
+				   1 << SEG6_LOCAL_TABLE),
+		.input		= input_action_end_am,
 	},
 	{
 		.action		= SEG6_LOCAL_ACTION_END_BPF,

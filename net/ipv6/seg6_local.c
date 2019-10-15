@@ -52,6 +52,7 @@ struct seg6_local_lwt {
 	struct in6_addr nh6;
 	int iif;
 	int oif;
+	u8 endflavour;
 	struct bpf_lwt_prog bpf;
 
 	int headroom;
@@ -194,6 +195,43 @@ out:
 	return dst->error;
 }
 
+static int seg6_local_endflavour(struct sk_buff *skb, struct ipv6_sr_hdr *srh,
+				 u8 flavour)
+{
+	int ret = 0;
+	u16 srhlen;
+	u16 plen;
+	struct ipv6hdr *hdr = ipv6_hdr(skb);
+
+	switch (flavour) {
+	case SEG6_LOCAL_ENDFLAVOUR_PSP:
+		srhlen = (srh->hdrlen + 1) << 3;
+		plen = ntohs(hdr->payload_len);
+		hdr->nexthdr = srh->nexthdr;
+		hdr->payload_len = htons(plen - srhlen);
+
+		memmove(((char *)hdr) + srhlen, hdr, sizeof(*hdr));
+		if (!pskb_pull(skb, srhlen)) {
+			ret = -EINVAL;
+			break;
+		}
+		skb_postpull_rcsum(skb, skb_network_header(skb), srhlen);
+		skb_reset_network_header(skb);
+		skb_reset_transport_header(skb);
+		break;
+
+	case SEG6_LOCAL_ENDFLAVOUR_NONE:
+		break;
+
+	case SEG6_LOCAL_ENDFLAVOUR_USP:
+	case SEG6_LOCAL_ENDFLAVOUR_USD:
+	default:
+		ret = -ENOTSUPP;
+	}
+
+	return ret;
+}
+
 /* regular endpoint function */
 static int input_action_end(struct sk_buff *skb, struct seg6_local_lwt *slwt)
 {
@@ -204,6 +242,10 @@ static int input_action_end(struct sk_buff *skb, struct seg6_local_lwt *slwt)
 		goto drop;
 
 	advance_nextseg(srh, &ipv6_hdr(skb)->daddr);
+	if (srh->segments_left == 0) {
+		if (seg6_local_endflavour(skb, srh, slwt->endflavour) < 0)
+			goto drop;
+	}
 
 	seg6_lookup_nexthop(skb, NULL, 0);
 
@@ -224,6 +266,10 @@ static int input_action_end_x(struct sk_buff *skb, struct seg6_local_lwt *slwt)
 		goto drop;
 
 	advance_nextseg(srh, &ipv6_hdr(skb)->daddr);
+	if (srh->segments_left == 0) {
+		if (seg6_local_endflavour(skb, srh, slwt->endflavour) < 0)
+			goto drop;
+	}
 
 	seg6_lookup_nexthop(skb, &slwt->nh6, 0);
 
@@ -243,6 +289,10 @@ static int input_action_end_t(struct sk_buff *skb, struct seg6_local_lwt *slwt)
 		goto drop;
 
 	advance_nextseg(srh, &ipv6_hdr(skb)->daddr);
+	if (srh->segments_left == 0) {
+		if (seg6_local_endflavour(skb, srh, slwt->endflavour) < 0)
+			goto drop;
+	}
 
 	seg6_lookup_nexthop(skb, NULL, slwt->table);
 
@@ -555,17 +605,19 @@ drop:
 static struct seg6_action_desc seg6_action_table[] = {
 	{
 		.action		= SEG6_LOCAL_ACTION_END,
-		.attrs		= 0,
+		.attrs		= (1 << SEG6_LOCAL_ENDFLAVOUR),
 		.input		= input_action_end,
 	},
 	{
 		.action		= SEG6_LOCAL_ACTION_END_X,
-		.attrs		= (1 << SEG6_LOCAL_NH6),
+		.attrs		= (1 << SEG6_LOCAL_NH6 |
+				   1 << SEG6_LOCAL_ENDFLAVOUR),
 		.input		= input_action_end_x,
 	},
 	{
 		.action		= SEG6_LOCAL_ACTION_END_T,
-		.attrs		= (1 << SEG6_LOCAL_TABLE),
+		.attrs		= (1 << SEG6_LOCAL_TABLE |
+				   1 << SEG6_LOCAL_ENDFLAVOUR),
 		.input		= input_action_end_t,
 	},
 	{
@@ -656,6 +708,7 @@ static const struct nla_policy seg6_local_policy[SEG6_LOCAL_MAX + 1] = {
 	[SEG6_LOCAL_IIF]	= { .type = NLA_U32 },
 	[SEG6_LOCAL_OIF]	= { .type = NLA_U32 },
 	[SEG6_LOCAL_BPF]	= { .type = NLA_NESTED },
+	[SEG6_LOCAL_ENDFLAVOUR] = { .type = NLA_U8 },
 };
 
 static int parse_nla_srh(struct nlattr **attrs, struct seg6_local_lwt *slwt)
@@ -901,6 +954,37 @@ static int cmp_nla_bpf(struct seg6_local_lwt *a, struct seg6_local_lwt *b)
 	return strcmp(a->bpf.name, b->bpf.name);
 }
 
+static int parse_nla_endflavour(struct nlattr **attrs,
+				struct seg6_local_lwt *slwt)
+{
+	slwt->endflavour = nla_get_u8(attrs[SEG6_LOCAL_ENDFLAVOUR]);
+	if (slwt->endflavour > SEG6_LOCAL_ENDFLAVOUR_MAX)
+		return -EINVAL;
+
+	if (slwt->endflavour == SEG6_LOCAL_ENDFLAVOUR_USP ||
+	    slwt->endflavour ==  SEG6_LOCAL_ENDFLAVOUR_USD)
+	return -ENOTSUPP;
+
+	return 0;
+}
+
+static int put_nla_endflavour(struct sk_buff *skb, struct seg6_local_lwt *slwt)
+{
+	if (nla_put_u8(skb, SEG6_LOCAL_ENDFLAVOUR, slwt->endflavour))
+		return -EMSGSIZE;
+
+	return 0;
+}
+
+static int cmp_nla_endflavour(struct seg6_local_lwt *a,
+			      struct seg6_local_lwt *b)
+{
+	if (a->endflavour != b->endflavour)
+		return 1;
+
+	return 0;
+}
+
 struct seg6_action_param {
 	int (*parse)(struct nlattr **attrs, struct seg6_local_lwt *slwt);
 	int (*put)(struct sk_buff *skb, struct seg6_local_lwt *slwt);
@@ -935,6 +1019,10 @@ static struct seg6_action_param seg6_action_params[SEG6_LOCAL_MAX + 1] = {
 	[SEG6_LOCAL_BPF]	= { .parse = parse_nla_bpf,
 				    .put = put_nla_bpf,
 				    .cmp = cmp_nla_bpf },
+
+	[SEG6_LOCAL_ENDFLAVOUR] = { .parse = parse_nla_endflavour,
+				    .put = put_nla_endflavour,
+				    .cmp = cmp_nla_endflavour },
 
 };
 
@@ -1084,6 +1172,9 @@ static int seg6_local_get_encap_size(struct lwtunnel_state *lwt)
 		nlsize += nla_total_size(sizeof(struct nlattr)) +
 		       nla_total_size(MAX_PROG_NAME) +
 		       nla_total_size(4);
+
+	if (attrs & (1 << SEG6_LOCAL_ENDFLAVOUR))
+		nlsize += nla_total_size(1);
 
 	return nlsize;
 }

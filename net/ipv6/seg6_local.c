@@ -602,6 +602,48 @@ drop:
 	return -EINVAL;
 }
 
+/* TS filed of End.XTS. List of sr6_xts It is placed on the head of
+ * UDP payload.  Each entry is indxed by SegmentLeft */
+struct sr6_xts {
+	struct in6_addr sid;
+	struct timespec	tstamp;
+};
+
+/* custom timestamp function */
+static int input_action_end_xts(struct sk_buff *skb,
+				struct seg6_local_lwt *slwt)
+{
+	struct ipv6_sr_hdr *srh;
+	struct sr6_xts *xts;
+	struct udphdr *udp = udp_hdr(skb);
+
+	srh = get_and_validate_srh(skb);
+	if (!srh)
+		goto drop;
+
+	/* save the current SID and timestamp on UDP payload */
+	xts = (struct sr6_xts *)
+		(((char *)(udp + 1)) +
+		 (sizeof(struct sr6_xts) * srh->segments_left));
+	xts->sid = *(srh->segments + srh->segments_left);
+	skb_get_timestampns(skb, &xts->tstamp);
+
+	/* perform End */
+	advance_nextseg(srh, &ipv6_hdr(skb)->daddr);
+	if (srh->segments_left == 0) {
+		if (seg6_local_endflavour(skb, srh, slwt->endflavour) < 0)
+			goto drop;
+	}
+
+	seg6_lookup_nexthop(skb, NULL, 9);
+
+	return dst_input(skb);
+
+drop:
+	kfree_skb(skb);
+	return -EINVAL;
+}
+
 static struct seg6_action_desc seg6_action_table[] = {
 	{
 		.action		= SEG6_LOCAL_ACTION_END,
@@ -661,6 +703,11 @@ static struct seg6_action_desc seg6_action_table[] = {
 		.action		= SEG6_LOCAL_ACTION_END_BPF,
 		.attrs		= (1 << SEG6_LOCAL_BPF),
 		.input		= input_action_end_bpf,
+	},
+	{
+		.action		= SEG6_LOCAL_ACTION_END_XTS,
+		.attrs		= (1 << SEG6_LOCAL_ENDFLAVOUR),
+		.input		= input_action_end_xts,
 	},
 
 };

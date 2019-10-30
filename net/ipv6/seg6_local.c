@@ -23,6 +23,7 @@
 #include <net/addrconf.h>
 #include <net/ip6_route.h>
 #include <net/dst_cache.h>
+#include <net/udp.h>
 #ifdef CONFIG_IPV6_SEG6_HMAC
 #include <net/seg6_hmac.h>
 #endif
@@ -613,13 +614,22 @@ struct sr6_xts {
 static int input_action_end_xts(struct sk_buff *skb,
 				struct seg6_local_lwt *slwt)
 {
+	struct ipv6hdr *hdr = ipv6_hdr(skb);
 	struct ipv6_sr_hdr *srh;
 	struct sr6_xts *xts;
-	struct udphdr *udp = udp_hdr(skb);
+	struct udphdr *udp;
+	unsigned int off = 0;
 
 	srh = get_and_validate_srh(skb);
 	if (!srh)
 		goto drop;
+
+	if (ipv6_find_hdr(skb, &off, IPPROTO_UDP, NULL, NULL) < 0) {
+		pr_err("%s: not udp packet\n", __func__);
+		goto drop;
+	}
+	skb_set_transport_header(skb, off);
+	udp = udp_hdr(skb);
 
 	/* save the current SID and timestamp on UDP payload */
 	xts = (struct sr6_xts *)
@@ -628,6 +638,16 @@ static int input_action_end_xts(struct sk_buff *skb,
 	xts->sid = *(srh->segments + srh->segments_left);
 	skb_get_timestampns(skb, &xts->tstamp);
 
+	/* XXX: reculculate UDP checksum */
+	skb->ip_summed = CHECKSUM_NONE;
+	skb->csum = csum_partial(udp + 1,
+				 ntohs(udp->len) - sizeof(struct udphdr),
+				 0);
+	udp->check = 0;
+	udp->check = csum_ipv6_magic(&hdr->saddr, &srh->segments[0],
+				     skb->len - off, IPPROTO_UDP,
+				     udp_csum(skb));
+
 	/* perform End */
 	advance_nextseg(srh, &ipv6_hdr(skb)->daddr);
 	if (srh->segments_left == 0) {
@@ -635,7 +655,7 @@ static int input_action_end_xts(struct sk_buff *skb,
 			goto drop;
 	}
 
-	seg6_lookup_nexthop(skb, NULL, 9);
+	seg6_lookup_nexthop(skb, NULL, 0);
 
 	return dst_input(skb);
 

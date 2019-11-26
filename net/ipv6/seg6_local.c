@@ -664,6 +664,96 @@ drop:
 	return -EINVAL;
 }
 
+/* custom timestamp function:
+ * this variant changes source addr to SID
+ */
+static int input_action_end_xts2(struct sk_buff *skb,
+				 struct seg6_local_lwt *slwt)
+{
+	struct ipv6hdr *hdr = ipv6_hdr(skb);
+	struct ipv6_sr_hdr *srh;
+	struct sr6_xts *xts;
+	struct udphdr *udp;
+	unsigned int off = 0;
+
+	srh = get_and_validate_srh(skb);
+	if (!srh)
+		goto drop;
+
+	if (ipv6_find_hdr(skb, &off, IPPROTO_UDP, NULL, NULL) < 0) {
+		pr_err("%s: not udp packet\n", __func__);
+		goto drop;
+	}
+	skb_set_transport_header(skb, off);
+	udp = udp_hdr(skb);
+
+	/* save the current SID and timestamp on UDP payload */
+	xts = (struct sr6_xts *)
+		(((char *)(udp + 1)) +
+		 (sizeof(struct sr6_xts) * srh->segments_left));
+	xts->sid = *(srh->segments + srh->segments_left);
+	skb_get_timestampns(skb, &xts->tstamp);
+
+	/* update source add with this SID to bypass src/dst check
+	 * on, typically, AWS */
+	hdr->saddr = xts->sid;
+
+	/* XXX: reculculate UDP checksum */
+	skb->ip_summed = CHECKSUM_NONE;
+	skb->csum = csum_partial(udp + 1,
+				 ntohs(udp->len) - sizeof(struct udphdr),
+				 0);
+	udp->check = 0;
+	udp->check = csum_ipv6_magic(&hdr->saddr, &srh->segments[0],
+				     skb->len - off, IPPROTO_UDP,
+				     udp_csum(skb));
+
+	/* perform End */
+	advance_nextseg(srh, &ipv6_hdr(skb)->daddr);
+	if (srh->segments_left == 0) {
+		if (seg6_local_endflavour(skb, srh, slwt->endflavour) < 0)
+			goto drop;
+	}
+
+	seg6_lookup_nexthop(skb, NULL, 0);
+
+	return dst_input(skb);
+
+drop:
+	kfree_skb(skb);
+	return -EINVAL;
+}
+
+/* regular endpoint function with source address swapping */
+static int input_action_end_sw(struct sk_buff *skb,
+			       struct seg6_local_lwt *slwt)
+{
+	struct ipv6hdr *hdr = ipv6_hdr(skb);
+	struct ipv6_sr_hdr *srh;
+
+	srh = get_and_validate_srh(skb);
+	if (!srh)
+		goto drop;
+
+	advance_nextseg(srh, &ipv6_hdr(skb)->daddr);
+	if (srh->segments_left == 0) {
+		if (seg6_local_endflavour(skb, srh, slwt->endflavour) < 0)
+			goto drop;
+	}
+
+	seg6_lookup_nexthop(skb, NULL, 0);
+
+	/* swap source address with IPv6 addr of outgoing interface */
+	ipv6_dev_get_saddr(dev_net(skb->dev), skb->dev, &hdr->daddr,
+			   IPV6_PREFER_SRC_PUBLIC, &hdr->saddr);
+
+	return dst_input(skb);
+
+drop:
+	kfree_skb(skb);
+	return -EINVAL;
+}
+
 static struct seg6_action_desc seg6_action_table[] = {
 	{
 		.action		= SEG6_LOCAL_ACTION_END,
@@ -728,6 +818,16 @@ static struct seg6_action_desc seg6_action_table[] = {
 		.action		= SEG6_LOCAL_ACTION_END_XTS,
 		.attrs		= (1 << SEG6_LOCAL_ENDFLAVOUR),
 		.input		= input_action_end_xts,
+	},
+	{
+		.action		= SEG6_LOCAL_ACTION_END_XTS2,
+		.attrs		= (1 << SEG6_LOCAL_ENDFLAVOUR),
+		.input		= input_action_end_xts2,
+	},
+	{
+		.action		= SEG6_LOCAL_ACTION_END_SW,
+		.attrs		= (1 << SEG6_LOCAL_ENDFLAVOUR),
+		.input		= input_action_end_sw,
 	},
 
 };

@@ -3,6 +3,7 @@ fs2tar
 cptofs
 cpfromfs
 lklfuse
+stat
 tests/valgrind*.xml
 *.exe
 *.dll

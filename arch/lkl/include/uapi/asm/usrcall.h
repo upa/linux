@@ -23,4 +23,7 @@ struct lkl_usrcall_reg {
 #define LKL_USRCALL_GET		_IOWR('i', 3, struct lkl_usrcall_reg)
 
 
+/* tools/lkl/lib/usrcall.c */
+int lkl_init_dev_usrcall(char *devpath);
+
 #endif

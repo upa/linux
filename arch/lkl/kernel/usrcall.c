@@ -30,29 +30,6 @@ static int lkl_usrcall_release(struct inode *inode, struct file *filp)
 	return 0;
 }
 
-static int lkl_usrcall_reg_test(struct lkl_usrcall_reg *reg)
-{
-	usrcall_table[reg->location](0);
-	return 0;
-}
-
-static int lkl_usrcall_reg_copy_from_user(struct lkl_usrcall_reg *reg)
-{
-	return 0;
-}
-
-static int lkl_usrcall_reg_copy_to_user(struct lkl_usrcall_reg *reg)
-{
-	return 0;
-}
-
-typedef int (*reg_handle_t)(struct lkl_usrcall_reg *);
-static reg_handle_t usrcall_handle[LKL_USRCALL_LOC_MAX + 1] = {
-	[LKL_USRCALL_LOC_TEST] = lkl_usrcall_reg_test,
-	[LKL_USRCALL_LOC_COPY_FROM_USER] = lkl_usrcall_reg_copy_from_user,
-	[LKL_USRCALL_LOC_COPY_TO_USER] = lkl_usrcall_reg_copy_to_user,
-};
-
 static long lkl_usrcall_ioctl(struct file *filp, unsigned int cmd,
 			  unsigned long data)
 {
@@ -74,9 +51,12 @@ static long lkl_usrcall_ioctl(struct file *filp, unsigned int cmd,
 			return -EBUSY;
 
 		usrcall_table[reg.location] = reg.function;
+		pr_info("register %llx to %d\n",
+			(uintptr_t)reg.function, reg.location);
 
-		if (usrcall_handle[reg.location])
-			ret = usrcall_handle[reg.location](&reg);
+		/* test */
+		if (reg.location == LKL_USRCALL_LOC_TEST)
+			usrcall_table[reg.location](0);
 		break;
 
 	case LKL_USRCALL_UNREG:
@@ -114,6 +94,26 @@ static struct miscdevice lkl_usrcall_mdev = {
 	.name	= "usrcall",
 	.fops	= &lkl_usrcall_fops,
 };
+
+/* usrcall hooks */
+int lkl_usrcall_raw_copy_from_user(void *to, const void __user *from,
+				   unsigned long n)
+{
+	int loc = LKL_USRCALL_LOC_COPY_FROM_USER;
+	if (usrcall_table[loc])
+		return usrcall_table[loc](loc, to, from, n);
+	return -1;
+}
+
+int lkl_usrcall_raw_copy_to_user(void __user *to, const void *from,
+				 unsigned long n)
+{
+	int loc = LKL_USRCALL_LOC_COPY_TO_USER;
+	if (usrcall_table[loc])
+		return usrcall_table[loc](loc, to, from, n);
+	return -1;
+}
+
 
 int usrcall_init(void)
 {

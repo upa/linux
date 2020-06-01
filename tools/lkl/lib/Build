@@ -23,3 +23,4 @@ liblkl-$(LKL_HOST_CONFIG_VIRTIO_NET_VDE) += virtio_net_vde.o
 liblkl-$(LKL_HOST_CONFIG_VIRTIO_NET) += virtio_net_pipe.o
 liblkl-y += ../../perf/pmu-events/jsmn.o
 liblkl-y += config.o
+liblkl-y += usrcall.o

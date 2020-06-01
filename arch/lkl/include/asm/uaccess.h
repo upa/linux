@@ -1,10 +1,19 @@
 #ifndef _ASM_LKL_UACCESS_H
 #define _ASM_LKL_UACCESS_H
 
+#include <asm/usrcall.h>
+
 /* copied from old include/asm-generic/uaccess.h */
 static inline __must_check long raw_copy_from_user(void *to,
 		const void __user *from, unsigned long n)
 {
+	int ret;
+
+	ret = lkl_usrcall_raw_copy_from_user(to, from, n);
+	if (ret == 0)
+		return 0;
+	/* XXX: should handle error */
+
 	if (__builtin_constant_p(n)) {
 		switch (n) {
 		case 1:
@@ -33,6 +42,13 @@ static inline __must_check long raw_copy_from_user(void *to,
 static inline __must_check long raw_copy_to_user(void __user *to,
 		const void *from, unsigned long n)
 {
+	int ret;
+
+	ret = lkl_usrcall_raw_copy_to_user(to, from, n);
+	if (ret == 0)
+		return 0;
+	/* XXX: should handle error */
+
 	if (__builtin_constant_p(n)) {
 		switch (n) {
 		case 1:

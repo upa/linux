@@ -27,6 +27,30 @@
 
 #define BIT(x) (1ULL << x)
 
+static int tap_up(char *ifname)
+{
+	struct ifreq ifr;
+	int fd;
+
+	fd = socket(AF_INET, SOCK_DGRAM, 0);
+	if (fd < 0) {
+		perror("socket for tap up");
+		return -1;
+	}
+
+	memset(&ifr, 0, sizeof(ifr));
+	ifr.ifr_flags = IFF_UP;
+	strncpy(ifr.ifr_name, ifname, IFNAMSIZ);
+
+	if (ioctl(fd, SIOCSIFFLAGS, (void *)&ifr) < 0) {
+		perror("ioctl for tap up");
+		close(fd);
+		return -1;
+	}
+
+	return 0;
+}
+
 struct lkl_netdev *lkl_netdev_tap_init(const char *path, int offload,
 				       struct ifreq *ifr)
 {
@@ -77,6 +101,9 @@ struct lkl_netdev *lkl_netdev_tap_init(const char *path, int offload,
 		return NULL;
 	}
 #endif
+	if (tap_up(ifr->ifr_name) < 0)
+		return NULL;
+
 	nd = lkl_register_netdev_fd(fd, fd);
 	if (!nd) {
 		perror("failed to register to.");

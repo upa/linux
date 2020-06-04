@@ -13,6 +13,7 @@
 #include <asm/syscalls.h>
 #include <asm/cpu.h>
 #include <asm/usrcall.h>
+#include <asm/proc.h>
 
 struct lkl_host_operations *lkl_ops;
 static char cmd_line[COMMAND_LINE_SIZE];
@@ -169,6 +170,7 @@ static int lkl_run_init(struct linux_binprm *bprm)
 
 	syscalls_init();
 	usrcall_init();
+	proc_init();
 
 	lkl_ops->sem_up(init_sem);
 	lkl_ops->thread_exit();

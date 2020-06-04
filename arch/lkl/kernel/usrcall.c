@@ -15,8 +15,8 @@
 
 
 /* XXX: need protect usrcall_table with rcu */
-static lkl_usrcall_t usrcall_table[LKL_USRCALL_LOC_MAX + 1] = {
-	[0 ... LKL_USRCALL_LOC_MAX] = NULL,
+static lkl_usrcall_t usrcall_table[LKL_USRCALL_MAX + 1] = {
+	[0 ... LKL_USRCALL_MAX] = NULL,
 };
 
 
@@ -40,7 +40,7 @@ static long lkl_usrcall_ioctl(struct file *filp, unsigned int cmd,
 		pr_err("%s: copy_from_user failed\n", __func__);
 		return -EFAULT;
 	}
-	if (reg.location < 0 || reg.location > LKL_USRCALL_LOC_MAX) {
+	if (reg.location < 0 || reg.location > LKL_USRCALL_MAX) {
 		pr_err("%s: invalid location %d\n", __func__, reg.location);
 		return -EINVAL;
 	}
@@ -51,11 +51,11 @@ static long lkl_usrcall_ioctl(struct file *filp, unsigned int cmd,
 			return -EBUSY;
 
 		usrcall_table[reg.location] = reg.function;
-		pr_info("register %llx to %d\n",
+		pr_info("register %lx to %d\n",
 			(uintptr_t)reg.function, reg.location);
 
 		/* test */
-		if (reg.location == LKL_USRCALL_LOC_TEST)
+		if (reg.location == LKL_USRCALL_TEST)
 			usrcall_table[reg.location](0);
 		break;
 
@@ -99,7 +99,7 @@ static struct miscdevice lkl_usrcall_mdev = {
 int lkl_usrcall_raw_copy_from_user(void *to, const void __user *from,
 				   unsigned long n)
 {
-	int loc = LKL_USRCALL_LOC_COPY_FROM_USER;
+	int loc = LKL_USRCALL_RAW_COPY_FROM_USER;
 	if (usrcall_table[loc])
 		return usrcall_table[loc](loc, to, from, n);
 	return -1;
@@ -108,7 +108,7 @@ int lkl_usrcall_raw_copy_from_user(void *to, const void __user *from,
 int lkl_usrcall_raw_copy_to_user(void __user *to, const void *from,
 				 unsigned long n)
 {
-	int loc = LKL_USRCALL_LOC_COPY_TO_USER;
+	int loc = LKL_USRCALL_RAW_COPY_TO_USER;
 	if (usrcall_table[loc])
 		return usrcall_table[loc](loc, to, from, n);
 	return -1;

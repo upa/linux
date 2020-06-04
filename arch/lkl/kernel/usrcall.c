@@ -47,12 +47,12 @@ static long lkl_usrcall_ioctl(struct file *filp, unsigned int cmd,
 
 	switch (cmd) {
 	case LKL_USRCALL_REG:
-		if (usrcall_table[reg.location])
+		if (usrcall_table[reg.location]) {
+			pr_err("location dup %d\n", reg.location);
 			return -EBUSY;
+		}
 
 		usrcall_table[reg.location] = reg.function;
-		pr_info("register %lx to %d\n",
-			(uintptr_t)reg.function, reg.location);
 
 		/* test */
 		if (reg.location == LKL_USRCALL_TEST)

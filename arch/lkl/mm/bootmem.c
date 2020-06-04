@@ -70,3 +70,11 @@ void free_mem(void)
 	else
 		lkl_ops->mem_free((void *)_memory_start);
 }
+
+
+/* For RDMA */
+void obtain_bootmem(unsigned long *start, unsigned long *size)
+{
+	*start = memory_start;
+	*size = mem_size;
+}

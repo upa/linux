@@ -11,11 +11,7 @@ int lkl_init_dev_usrcall(char *devpath)
 
 	ret = lkl_sys_access("/proc", F_OK);
 	if (ret < 0) {
-		/* mkdir and mount /proc */
-		ret = lkl_sys_mkdir("/proc", 0777);
-		if (ret < 0)
-			return ret;
-		ret = lkl_sys_mount("none", "/proc", "proc", 0, 0);
+		ret = lkl_mount_fs("/proc");
 		if (ret < 0)
 			return ret;
 	}

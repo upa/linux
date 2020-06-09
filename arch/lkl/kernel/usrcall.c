@@ -114,6 +114,14 @@ int lkl_usrcall_raw_copy_to_user(void __user *to, const void *from,
 	return -1;
 }
 
+int lkl_usrcall_strncpy_from_user(char *dst, const char __user *src,
+				  long count)
+{
+	int loc = LKL_USRCALL_STRNCPY_FROM_USER;
+	if (usrcall_table[loc])
+		return usrcall_table[loc](loc, dst, src, count);
+	return -1;
+}
 
 int usrcall_init(void)
 {

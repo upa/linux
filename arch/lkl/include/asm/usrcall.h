@@ -12,6 +12,8 @@ int lkl_usrcall_raw_copy_from_user(void *to, const void __user *from,
 				   unsigned long n);
 int lkl_usrcall_raw_copy_to_user(void __user *to, const void *from,
 				 unsigned long n);
+int lkl_usrcall_strncpy_from_user(char *dst, const char __user *src,
+				  long count);
 
 #include <uapi/asm/usrcall.h>
 

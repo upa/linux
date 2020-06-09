@@ -75,6 +75,27 @@ static inline __must_check long raw_copy_to_user(void __user *to,
 }
 
 
+#define __strncpy_from_user __strncpy_from_user
+
+static inline long
+__strncpy_from_user(char *dst, const char __user *src, long count)
+{
+	char *tmp;
+	int ret;
+
+	ret = lkl_usrcall_strncpy_from_user(dst, src, count);
+
+	/* not registered */
+	if (ret < 0)
+		strncpy(dst, (const char __force *)src, count);
+
+	for (tmp = dst; *tmp && count > 0; tmp++, count--);
+
+	return (tmp - dst);
+}
+
+
+
 #include <asm-generic/uaccess.h>
 
 #endif

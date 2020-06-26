@@ -1,6 +1,8 @@
 #ifndef _LKL_H
 #define _LKL_H
 
+#include <sys/types.h>
+
 #include "lkl_autoconf.h"
 
 #ifdef __cplusplus

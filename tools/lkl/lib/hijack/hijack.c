@@ -204,7 +204,7 @@ HOST_CALL(ioctl);
 #ifdef __ANDROID__
 int ioctl(int fd, int req, ...)
 #else
-int ioctl(int fd, unsigned long req, ...)
+int ioctl(int fd, int req, ...)
 #endif
 {
 	va_list vl;

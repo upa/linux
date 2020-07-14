@@ -131,7 +131,7 @@ struct lkl_netdev *lkl_netdev_tap_create(const char *ifname, int offload)
 #endif
 	};
 
-	strncpy(ifr.ifr_name, ifname, IFNAMSIZ);
+	strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
 
 	return lkl_netdev_tap_init(path, offload, &ifr);
 }

@@ -21,6 +21,8 @@
 #include <sys/poll.h>
 #include <sys/uio.h>
 
+#include <sys/epoll.h>
+
 #include "virtio.h"
 #include "virtio_net_fd.h"
 
@@ -41,6 +43,8 @@ struct lkl_netdev_fd {
 	 * stall: when poll resets the poll variable we know that TX / RX will
 	 * run which means that eventually the poll variable will be set.
 	 */
+	int epoll_fd;
+
 	int poll_tx, poll_rx;
 	/* controle pipe */
 	int pipe[2];
@@ -94,6 +98,54 @@ static int fd_net_rx(struct lkl_netdev *nd, struct iovec *iov, int cnt)
 	return ret;
 }
 
+
+static int fd_net_poll(struct lkl_netdev *nd)
+{
+	struct lkl_netdev_fd *nd_fd =
+		container_of(nd, struct lkl_netdev_fd, dev);
+	struct epoll_event events[3];
+	int ret, n, fd, nfds;
+
+	do {
+		nfds = epoll_wait(nd_fd->epoll_fd, events, 3, -1);
+	} while (nfds == -1 && errno == EINTR);
+
+	if (nfds < 0) {
+		perror("virtio net fd poll");
+		return 0;
+	}
+
+	ret = 0;
+
+	for (n = 0; n < nfds; n++) {
+		fd = events[n].data.fd;
+		if (fd == nd_fd->pipe[0]) {
+			if (events[n].events & (EPOLLHUP|POLLNVAL))
+				return LKL_DEV_NET_POLL_HUP;
+
+			if (events[n].events & POLLIN) {
+				char tmp[PIPE_BUF];
+				ret = read(nd_fd->pipe[0], tmp, PIPE_BUF);
+				if (ret == 0)
+					return LKL_DEV_NET_POLL_HUP;
+				if (ret < 0) {
+					perror("virtio net fd pipe read");
+					ret = 0;
+				}
+			}
+		} else if (fd == nd_fd->fd_rx) {
+			nd_fd->poll_rx = 0;
+			ret |= LKL_DEV_NET_POLL_RX;
+		} else if (fd == nd_fd->fd_tx) {
+			nd_fd->poll_tx = 0;
+			ret |= LKL_DEV_NET_POLL_TX;
+		}
+	}
+
+	return ret;
+}
+
+#if 0
 static int fd_net_poll(struct lkl_netdev *nd)
 {
 	struct lkl_netdev_fd *nd_fd =
@@ -153,6 +205,7 @@ static int fd_net_poll(struct lkl_netdev *nd)
 
 	return ret;
 }
+#endif
 
 static void fd_net_poll_hup(struct lkl_netdev *nd)
 {
@@ -185,6 +238,7 @@ struct lkl_dev_net_ops fd_net_ops =  {
 struct lkl_netdev *lkl_register_netdev_fd(int fd_rx, int fd_tx)
 {
 	struct lkl_netdev_fd *nd;
+	struct epoll_event ev[3];
 
 	nd = malloc(sizeof(*nd));
 	if (!nd) {
@@ -210,6 +264,17 @@ struct lkl_netdev *lkl_register_netdev_fd(int fd_rx, int fd_tx)
 		free(nd);
 		return NULL;
 	}
+
+	nd->epoll_fd = epoll_create1(0);
+	ev[0].events = EPOLLIN|EPOLLPRI;
+	ev[0].data.fd = fd_rx;
+	ev[1].events = EPOLLOUT;
+	ev[1].data.fd = fd_tx;
+	ev[2].events = EPOLLIN;
+	ev[2].data.fd = nd->pipe[0];
+	epoll_ctl(nd->epoll_fd, EPOLL_CTL_ADD, ev[0].data.fd, &ev[0]);
+	epoll_ctl(nd->epoll_fd, EPOLL_CTL_ADD, ev[1].data.fd, &ev[1]);
+	epoll_ctl(nd->epoll_fd, EPOLL_CTL_ADD, ev[2].data.fd, &ev[2]);
 
 	nd->dev.ops = &fd_net_ops;
 	return &nd->dev;

@@ -102,7 +102,7 @@ struct lkl_netdev *lkl_netdev_tap_init(const char *path, int offload,
 	}
 #endif
 	/* XXX: if type is macvtap ifr is /dev/tapXX, so it cannot set up */
-	if (strncmp(path, "/dev/", 4) != 0) {
+	if (strncmp(ifr->ifr_name, "tap", 3) == 0) {
 		if (tap_up(ifr->ifr_name) < 0)
 			return NULL;
 	}

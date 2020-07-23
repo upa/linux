@@ -99,6 +99,8 @@ static int fd_net_rx(struct lkl_netdev *nd, struct iovec *iov, int cnt)
 }
 
 
+#ifdef FD_NET_EPOLL
+
 static int fd_net_poll(struct lkl_netdev *nd)
 {
 	struct lkl_netdev_fd *nd_fd =
@@ -145,7 +147,7 @@ static int fd_net_poll(struct lkl_netdev *nd)
 	return ret;
 }
 
-#if 0
+#else
 static int fd_net_poll(struct lkl_netdev *nd)
 {
 	struct lkl_netdev_fd *nd_fd =

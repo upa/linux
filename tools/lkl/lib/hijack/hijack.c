@@ -203,7 +203,9 @@ int socket(int domain, int type, int protocol)
 HOST_CALL(ioctl);
 #ifdef __ANDROID__
 int ioctl(int fd, int req, ...)
-#else
+#elif __GLIBC__
+int ioctl(int fd, unsigned long req, ...)
+#else /* musl libc */
 int ioctl(int fd, int req, ...)
 #endif
 {

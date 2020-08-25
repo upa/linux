@@ -91,6 +91,22 @@ define nt_host
   $(if $(filter $(1),pe-x86-64),$(call nt64_host))
 endef
 
+
+define do_autoconf_linux
+  $(call set_autoconf_var,LINUX,y)
+  export CROSS_COMPILE := $(CROSS_COMPILE)
+  export CC := $(CROSS_COMPILE)gcc
+  export LD := $(CROSS_COMPILE)ld
+  export AR := $(CROSS_COMPILE)ar
+  $(eval LD := $(CROSS_COMPILE)ld)
+
+  CFLAGS = -nostdinc -nostdlib $(LINUXINCLUDE) $(KBUILD_CLAGKBUILD_CLAGSS) \
+	   $(KBUILD_CPPFLAGS)
+endef
+
+export do_autoconf_linux
+
+
 define do_autoconf
   export CROSS_COMPILE := $(CROSS_COMPILE)
   export CC := $(CROSS_COMPILE)gcc
@@ -107,9 +123,54 @@ endef
 export do_autoconf
 
 
+# For using Linux kernel as host
+SRCARCH = $(shell uname -p)
+ifeq ($(SRCARCH), x86_64)
+	SRCARCH = x86
+endif
+srctree = /lib/modules/$(shell uname -r)/build
+objtree = $(srctree)
+USERINCLUDE := \
+                -I$(srctree)/arch/$(SRCARCH)/include/uapi \
+                -I$(objtree)/arch/$(SRCARCH)/include/generated/uapi \
+                -I$(srctree)/include/uapi \
+                -I$(objtree)/include/generated/uapi \
+                -include $(srctree)/include/linux/kconfig.h
+
+LINUXINCLUDE    := \
+                -I$(srctree)/arch/$(SRCARCH)/include \
+                -I$(objtree)/arch/$(SRCARCH)/include/generated \
+                $(if $(building_out_of_srctree),-I$(srctree)/include) \
+                -I$(objtree)/include \
+                $(USERINCLUDE) \
+		-isystem /usr/lib/gcc/x86_64-linux-gnu/9/include
+
+KBUILD_CPPFLAGS = -D__KERNEL__
+
+KBUILD_CFLAGS   := -Wall -Wundef -Werror=strict-prototypes -Wno-trigraphs \
+                   -fno-strict-aliasing -fno-common -fshort-wchar \
+                   -Werror=implicit-function-declaration -Werror=implicit-int \
+                   -Wno-format-security \
+                   -std=gnu89
+
+ifeq ($(LINUX_HOST), yes)
+
 $(OUTPUT)Makefile.conf: Makefile.autoconf
+	@echo use Linux!!
+	$(shell mkdir -p $(OUTPUT)/include)
+	$(shell mkdir -p $(OUTPUT)/tests)
+	$(shell echo -n "" > $(OUTPUT)/include/lkl_autoconf.h)
+	$(shell echo -n "" > $(OUTPUT)/tests/autoconf.sh)
+	@echo "$$do_autoconf_linux" > $(OUTPUT)/Makefile.conf
+
+else
+
+$(OUTPUT)Makefile.conf: Makefile.autoconf
+	@echo use not Linux...
 	$(shell mkdir -p $(OUTPUT)/include)
 	$(shell mkdir -p $(OUTPUT)/tests)
 	$(shell echo -n "" > $(OUTPUT)/include/lkl_autoconf.h)
 	$(shell echo -n "" > $(OUTPUT)/tests/autoconf.sh)
 	@echo "$$do_autoconf" > $(OUTPUT)/Makefile.conf
+
+endif

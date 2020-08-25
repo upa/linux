@@ -21,7 +21,7 @@ LDLIBS_lib/hijack/liblkl-hijack-$(LKL_HOST_CONFIG_I386) += -lc_nonshared
 #LDLIBS_cptofs-y := -larchive
 #LDLIBS_cptofs-$(LKL_HOST_CONFIG_NEEDS_LARGP) += -largp
 
-progs-y += tests/boot
-progs-y += tests/disk
-progs-y += tests/net-test
+#progs-y += tests/boot
+#progs-y += tests/disk
+#progs-y += tests/net-test
 

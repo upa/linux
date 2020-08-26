@@ -1,5 +1,29 @@
+
+#ifndef __KERNEL__
 #include <string.h>
 #include <stdio.h>
+#else
+#include <linux/kernel.h>
+#include <linux/string.h>
+
+char *strtok(char *str, const char *delim)
+{
+	char *s = str, *r;
+	r = strsep(&s, delim);
+	return r;
+}
+
+char *strtok_r(char *str, const char *delim, char **saveptr)
+{
+	char *s = str, *r;
+	r = strsep(&s, delim);
+	*saveptr = s;
+	return r;
+}
+
+#endif
+
+
 #include "endian.h"
 #include <lkl_host.h>
 

@@ -6,6 +6,7 @@ liblkl-y += fs.o
 liblkl-y += iomem.o
 liblkl-y += net.o
 liblkl-y += jmp_buf.o
+liblkl-$(LKL_HOST_CONFIG_LINUX) += longjmp.S setjmp.S
 liblkl-$(LKL_HOST_CONFIG_POSIX) += posix-host.o
 liblkl-$(LKL_HOST_CONFIG_NT) += nt-host.o
 liblkl-$(LKL_HOST_CONFIG_LINUX) += linux-host.o

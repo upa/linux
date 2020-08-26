@@ -1,5 +1,12 @@
+
+#ifndef __KERNEL__
 #include <string.h>
 #include <stdint.h>
+#else
+#include <linux/kernel.h>
+#include <linux/string.h>
+#include <linux/types.h>
+#endif
 #include <lkl_host.h>
 
 #include "iomem.h"

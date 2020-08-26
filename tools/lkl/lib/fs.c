@@ -1,7 +1,22 @@
 #include <stdarg.h>
+
+#ifndef __KERNEL__
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#else
+#include <linux/kernel.h>
+#include <linux/string.h>
+
+static int atoi(const char *nptr)
+{
+	long long res;
+	return kstrtoll(nptr, 0, &res);
+}
+
+#endif
+
+
 #include <lkl_host.h>
 
 #include "virtio.h"

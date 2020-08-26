@@ -17,6 +17,8 @@
 #define htobe16(x) htons(x)
 #define be32toh(x) ntohl(x)
 #define be16toh(x) ntohs(x)
+#elif defined(__KERNEL__)
+#include <linux/byteorder/generic.h>
 #else
 #include <endian.h>
 #endif

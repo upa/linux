@@ -93,7 +93,6 @@ endef
 
 
 define do_autoconf_linux
-  $(call set_autoconf_var,LINUX,y)
   export CROSS_COMPILE := $(CROSS_COMPILE)
   export CC := $(CROSS_COMPILE)gcc
   export LD := $(CROSS_COMPILE)ld
@@ -102,9 +101,9 @@ define do_autoconf_linux
 
   CFLAGS = -nostdinc -nostdlib $(LINUXINCLUDE) $(KBUILD_CLAGKBUILD_CLAGSS) \
 	   $(KBUILD_CPPFLAGS)
+  $(call set_autoconf_var,LINUX,y)
 endef
 
-export do_autoconf_linux
 
 
 define do_autoconf
@@ -120,7 +119,6 @@ define do_autoconf
   $(if $(filter $(EXEC_FMT),$(NT_HOSTS)),$(call nt_host,$(LD_FMT)))
 endef
 
-export do_autoconf
 
 ifdef LINUX_SOURCE
 
@@ -144,7 +142,7 @@ LINUXINCLUDE    := \
                 $(if $(building_out_of_srctree),-I$(srctree)/include) \
                 -I$(objtree)/include \
                 $(USERINCLUDE) \
-		-isystem /usr/lib/gcc/x86_64-linux-gnu/9/include
+		-I /usr/lib/gcc/x86_64-linux-gnu/9/include
 
 KBUILD_CPPFLAGS = -D__KERNEL__
 
@@ -154,10 +152,12 @@ KBUILD_CFLAGS   := -Wall -Wundef -Werror=strict-prototypes -Wno-trigraphs \
                    -Wno-format-security \
                    -std=gnu89
 
+export do_autoconf_linux
 $(OUTPUT)Makefile.conf: Makefile.autoconf
 	@echo !!!!!!!!!!!!!!!!!!!!!!!!!! use Linux !!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	@echo !! linux kernel source is $(LINUX_SOURCE)
-	@echo !! run 'make oldconfig' on the directory in advance
+	@echo !! run 'make oldconfig' and 'make headers' on the directory
+	@echo !! before make liblkl
 	@echo !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	$(shell mkdir -p $(OUTPUT)/include)
 	$(shell mkdir -p $(OUTPUT)/tests)
@@ -167,6 +167,7 @@ $(OUTPUT)Makefile.conf: Makefile.autoconf
 
 else
 
+export do_autoconf
 $(OUTPUT)Makefile.conf: Makefile.autoconf
 	@echo use not Linux...
 	$(shell mkdir -p $(OUTPUT)/include)
@@ -174,5 +175,4 @@ $(OUTPUT)Makefile.conf: Makefile.autoconf
 	$(shell echo -n "" > $(OUTPUT)/include/lkl_autoconf.h)
 	$(shell echo -n "" > $(OUTPUT)/tests/autoconf.sh)
 	@echo "$$do_autoconf" > $(OUTPUT)/Makefile.conf
-
 endif

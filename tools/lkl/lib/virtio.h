@@ -1,7 +1,12 @@
 #ifndef _LKL_LIB_VIRTIO_H
 #define _LKL_LIB_VIRTIO_H
 
+#ifndef LKL_HOST_CONFIG_LINUX
 #include <stdint.h>
+#else
+#include <linux/types.h>
+#endif
+
 #include <lkl_host.h>
 
 #define PAGE_SIZE		4096

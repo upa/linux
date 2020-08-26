@@ -1,7 +1,11 @@
 #ifndef _LKL_H
 #define _LKL_H
 
+#ifndef __KERNEL__
 #include <sys/types.h>
+#else
+#include <linux/types.h>
+#endif
 
 #include "lkl_autoconf.h"
 

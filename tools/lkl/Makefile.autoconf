@@ -122,13 +122,14 @@ endef
 
 export do_autoconf
 
+ifdef LINUX_SOURCE
 
 # For using Linux kernel as host
 SRCARCH = $(shell uname -p)
 ifeq ($(SRCARCH), x86_64)
 	SRCARCH = x86
 endif
-srctree = /lib/modules/$(shell uname -r)/build
+srctree = $(LINUX_SOURCE)
 objtree = $(srctree)
 USERINCLUDE := \
                 -I$(srctree)/arch/$(SRCARCH)/include/uapi \
@@ -153,10 +154,11 @@ KBUILD_CFLAGS   := -Wall -Wundef -Werror=strict-prototypes -Wno-trigraphs \
                    -Wno-format-security \
                    -std=gnu89
 
-ifeq ($(LINUX_HOST), yes)
-
 $(OUTPUT)Makefile.conf: Makefile.autoconf
-	@echo use Linux!!
+	@echo !!!!!!!!!!!!!!!!!!!!!!!!!! use Linux !!!!!!!!!!!!!!!!!!!!!!!!!!!!
+	@echo !! linux kernel source is $(LINUX_SOURCE)
+	@echo !! run 'make oldconfig' on the directory in advance
+	@echo !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 	$(shell mkdir -p $(OUTPUT)/include)
 	$(shell mkdir -p $(OUTPUT)/tests)
 	$(shell echo -n "" > $(OUTPUT)/include/lkl_autoconf.h)

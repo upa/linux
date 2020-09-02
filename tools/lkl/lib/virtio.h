@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <lkl_host.h>
 
+#include "vhost.h"
+
 #define PAGE_SIZE		4096
 
 /* The following are copied from skbuff.h */
@@ -51,6 +53,26 @@ struct virtio_dev_ops {
 	void (*release_queue)(struct virtio_dev *dev, int queue_idx);
 };
 
+
+struct virtio_queue {
+	uint32_t num_max;
+	uint32_t num;
+	uint32_t ready;
+	uint32_t max_merge_len;
+
+	struct lkl_vring_desc *desc;
+	struct lkl_vring_avail *avail;
+	struct lkl_vring_used *used;
+	uint16_t last_avail_idx;
+	uint16_t last_used_idx_signaled;
+
+
+	/* for vhost */
+	void *log;
+	int kick_fd;
+	int call_fd;
+};
+
 struct virtio_dev {
 	uint32_t device_id;
 	uint32_t vendor_id;
@@ -67,10 +89,13 @@ struct virtio_dev {
 
 	struct virtio_dev_ops *ops;
 	int irq;
+
 	void *config_data;
 	int config_len;
 	void *base;
 	uint32_t virtio_mmio_id;
+
+	struct vhost *vhost;
 };
 
 int virtio_dev_setup(struct virtio_dev *dev, int queues, int num_max);

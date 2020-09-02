@@ -17,6 +17,9 @@ void __init bootmem_init(unsigned long mem_sz)
 	BUG_ON(!memory_start);
 	memory_end = memory_start + mem_size;
 
+	lkl_ops->memory_start = memory_start;
+	lkl_ops->memory_size = mem_size;
+
 	if (PAGE_ALIGN(memory_start) != memory_start) {
 		mem_size -= PAGE_ALIGN(memory_start) - memory_start;
 		memory_start = PAGE_ALIGN(memory_start);

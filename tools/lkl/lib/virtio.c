@@ -45,19 +45,6 @@
 		lkl_host_ops.panic();					\
 	} while (0)
 
-struct virtio_queue {
-	uint32_t num_max;
-	uint32_t num;
-	uint32_t ready;
-	uint32_t max_merge_len;
-
-	struct lkl_vring_desc *desc;
-	struct lkl_vring_avail *avail;
-	struct lkl_vring_used *used;
-	uint16_t last_avail_idx;
-	uint16_t last_used_idx_signaled;
-};
-
 struct _virtio_req {
 	struct virtio_req req;
 	struct virtio_dev *dev;
@@ -542,7 +529,9 @@ int virtio_dev_setup(struct virtio_dev *dev, int queues, int num_max)
 		dev->queue[i].num_max = num_max;
 
 	mmio_size = VIRTIO_MMIO_CONFIG + dev->config_len;
-	dev->base = register_iomem(dev, mmio_size, &virtio_ops);
+	dev->base = register_iomem(dev, mmio_size,
+				   !dev->vhost ?
+				   &virtio_ops : dev->vhost->vhost_ops);
 	if (!dev->base) {
 		lkl_host_ops.mem_free(dev->queue);
 		return -LKL_ENOMEM;

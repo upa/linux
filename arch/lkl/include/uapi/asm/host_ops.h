@@ -189,6 +189,8 @@ struct lkl_host_operations {
 	int (*munmap)(void *addr, unsigned long size);
 
 	struct lkl_dev_pci_ops *pci_ops;
+
+	unsigned long memory_start, memory_size;
 };
 
 /**

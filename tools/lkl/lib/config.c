@@ -491,6 +491,8 @@ static int lkl_config_netdev_create(struct lkl_config *cfg,
 						    mac);
 		} else if ((strcmp(iface->iftype, "pipe") == 0)) {
 			nd = lkl_netdev_pipe_create(iface->ifparams, offload);
+		} else if ((strcmp(iface->iftype, "vhost-net") == 0)) {
+			nd = lkl_vhost_net_create();
 		} else {
 			if (offload) {
 				lkl_printf("WARN: %s isn't supported on %s\n",
@@ -526,11 +528,16 @@ static int lkl_config_netdev_create(struct lkl_config *cfg,
 		}
 
 		nd_args.offload = offload;
-		ret = lkl_netdev_add(nd, &nd_args);
-		if (ret < 0) {
-			lkl_printf("failed to add netdev: %s\n",
-				   lkl_strerror(ret));
-			return -1;
+
+		if (strcmp(iface->iftype, "vhost-net") == 0)
+			ret = lkl_vhost_net_add(iface->ifparams, &nd_args);
+		else {
+			ret = lkl_netdev_add(nd, &nd_args);
+			if (ret < 0) {
+				lkl_printf("failed to add netdev: %s\n",
+					   lkl_strerror(ret));
+				return -1;
+			}
 		}
 		nd->id = ret;
 		iface->nd = nd;

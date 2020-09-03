@@ -55,6 +55,7 @@ endef
 define posix_host
   $(call set_autoconf_var,POSIX,y)
   $(call set_autoconf_var,VIRTIO_NET,y)
+  $(call set_autoconf_var,VHOST_NET,y)
   LDFLAGS += -pie
   CFLAGS += -fPIC -pthread
   SOSUF := .so

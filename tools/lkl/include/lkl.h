@@ -681,6 +681,60 @@ static inline void lkl_netdev_free(struct lkl_netdev *nd)
 #endif
 
 /**
+ * lkl_vhost_net_add - add a new network device using vhost-net
+ *
+ * Must be called before calling lkl_start_kernel.
+ *
+ * @path - a file name for the backend device. need to be configured
+ * on host in advance
+ * @args - arguments that configs the netdev. Can be NULL
+ * @returns a network device id (0 is valid) or a atrictly negative value in
+ * case of error
+ */
+#ifdef LKL_HOST_CONFIG_VHOST_NET
+int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args);
+#else
+static inline void lkl_vhost_net_add(int backend_fd,
+				     struct lkl_netdev_args *args)
+{
+}
+#endif
+
+/**
+ * lkl_vhost_net_remove - remove a previously added vhost network device
+ *
+ * Attempts to release all resources held by a vhost network device
+ * created via lkl_vhost_net_add.
+ *
+ * @id - the network device id, as returned by @lkl_vhost_net_add
+ *
+ */
+#ifdef LKL_HOST_CONFIG_VHOST_NET
+void lkl_vhost_net_remove(int id);
+#else
+static inline void lkl_vhost_net_remove(int id)
+{
+}
+#endif
+
+/**
+ * lkl_vhost_net_create - create lkl_netdev for vhost net device
+ *
+ * Just create struct lkl_netdev that is actually not needed for vhost_net
+ */
+#ifdef LKL_HOST_CONFIG_VHOST_NET
+struct lkl_netdev *lkl_vhost_net_create(void);
+#else
+static inline struct lkl_netdev *
+lkl_vhost_net_create(void)
+{
+	return NULL;
+}
+#endif
+
+
+
+/**
  * lkl_netdev_get_ifindex - retrieve the interface index for a given network
  * device id
  *

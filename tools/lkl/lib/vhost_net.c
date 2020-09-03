@@ -97,12 +97,10 @@ static int _vhost_net_ioctl(struct vhost_net_dev *dev, unsigned int long req,
 {
 	int ret;
 
-	lkl_printf("%s\n", reqstr);
-
 	ret = ioctl(dev->vhost_net_fd, req, arg);
 	if (ret < 0) {
-		lkl_printf("%s: ioctl %s: %s\n", __func__, reqstr,
-			   strerror(errno));
+		fprintf(stderr, "%s: ioctl %s: %s\n", __func__, reqstr,
+			strerror(errno));
 	}
 
 	return ret;
@@ -174,7 +172,6 @@ static int vhost_net_read(void *data, int offset, void *res, int size)
 		break;
 	case VIRTIO_MMIO_STATUS:
 		val = vdev->status;
-		lkl_printf("%s: status is 0x%x\n", __func__, vdev->status);
 		break;
 	case VIRTIO_MMIO_CONFIG_GENERATION:
 		val = vdev->config_gen;
@@ -184,8 +181,6 @@ static int vhost_net_read(void *data, int offset, void *res, int size)
 	}
 
 	*(uint32_t *)res = htole32(val);
-
-        lkl_printf("%s: offset is %x val is %d\n", __func__, offset, val);
 
 	return 0;
 }
@@ -218,32 +213,27 @@ static int vhost_net_set_eventfd(struct vhost_net_dev *dev)
 {
 	struct virtio_dev *vdev = &dev->dev;
 	struct virtio_queue *q = &vdev->queue[vdev->queue_sel];
-	struct vhost_vring_file f;
+	struct vhost_vring_file f = { .index = vdev->queue_sel };
 
 	q->kick_fd = eventfd(0, 0);
 	if (q->kick_fd < 0) {
-		lkl_printf("%s: eventfd(): %s\n", __func__, strerror(errno));
+		fprintf(stderr, "eventfd(): %s\n", strerror(errno));
 		return -1;
 	}
 
 	q->call_fd = eventfd(0, 0);
 	if (q->call_fd < 0) {
-		lkl_printf("%s: eventfd(): %s\n", __func__, strerror(errno));
+		fprintf(stderr, "eventfd(): %s\n", strerror(errno));
 		return -1;
 	}
 
-	f.index = vdev->queue_sel;
 	f.fd = q->kick_fd;
 	if (vhost_net_ioctl(dev, VHOST_SET_VRING_KICK, &f) < 0)
 		return -1;
 
-	f.index = vdev->queue_sel;
 	f.fd = q->call_fd;
 	if (vhost_net_ioctl(dev, VHOST_SET_VRING_CALL, &f) < 0)
 		return -1;
-
-	lkl_printf("q=%d kick=%d call=%d\n",
-		   vdev->queue_sel, q->kick_fd, q->call_fd);
 
 	return 0;
 }
@@ -254,13 +244,11 @@ static int vhost_net_kick(struct vhost_net_dev *dev, uint32_t qidx)
 	uint64_t v = 1;
 	int ret;
 
-	lkl_printf("%s: q %u avail index %u\n",
-		   __func__, qidx, q->avail->idx);
-
-	__sync_synchronize();
 	ret = write(q->kick_fd, &v, sizeof(v));
-	if (ret < 0)
-		lkl_printf("%s: write(): %s\n", __func__, strerror(errno));
+	if (ret < 0) {
+		fprintf(stderr, "%s: write(): %s\n", __func__,
+			strerror(errno));
+	}
 
 	return ret;
 }
@@ -278,14 +266,9 @@ static int vhost_net_set_vring_addr(struct vhost_net_dev *dev)
 	a.avail_user_addr = (uintptr_t)q->avail;
 	a.log_guest_addr = (uintptr_t)q->log;
 
-	lkl_printf("idx %u\n", a.index);
-	lkl_printf("desc_user %llx\n", a.desc_user_addr);
-	lkl_printf("used_user %llx\n", a.used_user_addr);
-	lkl_printf("avail_user %llx\n", a.avail_user_addr);
-
 	if (vhost_net_ioctl(dev, VHOST_SET_VRING_ADDR, &a) < 0) {
-		lkl_printf("%s: ioctl VHOST_SET_VRING_ADDR failed: %s\n",
-			   __func__, strerror(errno));
+		fprintf(stderr, "%s: ioctl VHOST_SET_VRING_ADDR failed: %s\n",
+			__func__, strerror(errno));
 		return -1;
 	}
 
@@ -300,12 +283,10 @@ static int vhost_net_set_backend(struct vhost_net_dev *dev)
 		.fd	= dev->backend_fd,
 	};
 
-	lkl_printf("set backend q %d fd %d\n", f.index, f.fd);
-
 	ret = vhost_net_ioctl(dev, VHOST_NET_SET_BACKEND, &f);
 	if (ret < 0)
-		lkl_printf("ioctl VHOSET_NET_SET_BACKEND failed: %s\n",
-			   strerror(errno));
+		fprintf(stderr, "ioctl VHOSET_NET_SET_BACKEND failed: %s\n",
+			strerror(errno));
 
 	return ret;
 }
@@ -325,14 +306,10 @@ static int vhost_net_set_mem_table(struct vhost_net_dev *dev)
 	vmem.r[0].memory_size = lkl_host_ops.memory_size;
 	vmem.r[0].userspace_addr = lkl_host_ops.memory_start;
 
-	lkl_printf("guest %lx\n", vmem.r[0].guest_phys_addr);
-	lkl_printf("size  %ld\n", vmem.r[0].memory_size);
-	lkl_printf("user  %lx\n", vmem.r[0].userspace_addr);
-
 	ret = vhost_net_ioctl(dev, VHOST_SET_MEM_TABLE, &vmem);
 	if (ret < 0)
-		lkl_printf("ioctl VHOST_SET_MEM_TABLE faield: %s\n",
-			   strerror(errno));
+		fprintf(stderr, "ioctl VHOST_SET_MEM_TABLE faield: %s\n",
+			strerror(errno));
 
 	return ret;
 }
@@ -412,8 +389,6 @@ static int vhost_net_write(void *data, int offset, void *res, int size)
 		return -LKL_EINVAL;
 
 	val = le32toh(*(uint32_t *)res);
-	lkl_printf("%s: q %d offset is %x val is %d\n",
-		   __func__, vdev->queue_sel, offset, val);
 
 	switch (offset) {
 	case VIRTIO_MMIO_DEVICE_FEATURES_SEL:
@@ -511,8 +486,6 @@ static struct vhost vhost_net = {
 
 static void virtio_deliver_irq(struct virtio_dev *dev)
 {
-	lkl_printf("DOOOO IRQ to %d\n", dev->irq);
-
 	dev->int_status |= VIRTIO_MMIO_INT_VRING;
 	__sync_synchronize();
 	lkl_trigger_irq(dev->irq);
@@ -544,8 +517,6 @@ static void vhost_net_poll_thread(void *arg)
 			}
 		}
 
-		printf("%s: qnum %d\n", __func__, qnum);
-
 		do {
 			ret = poll(x, qnum, 1000);
 		} while (ret == -1 && errno == EINTR);
@@ -559,12 +530,8 @@ static void vhost_net_poll_thread(void *arg)
 				continue;
 
 			ret = read(x[n].fd, &val, sizeof(val));
-			if (ret < 0) {
-				lkl_printf("%s: read failed: %s\n",
-					   __func__, strerror(errno));
+			if (ret < 0)
 				continue;
-			}
-			lkl_printf("%s: val is %lu\n", __func__, val);
 
 			virtio_deliver_irq(&dev->dev);
 		}
@@ -593,11 +560,13 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 	struct ifreq ifr;
 	int backend_fd, ret, tap_arg = 0;
 	int vnet_hdr_sz = sizeof(struct lkl_virtio_net_hdr_v1) ;
-	int offload = args->offload;
+	int offload = args ? args->offload : 0;
+	uint64_t f = 0;
 
 	backend_fd = open(path, O_RDWR);
 	if (backend_fd < 0) {
-		lkl_printf("failed to open %s: %s\n", path, strerror(errno));
+		fprintf(stderr, "failed to open %s: %s\n", path,
+			strerror(errno));
 		return -1;
 	}
 
@@ -609,29 +578,28 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 
 	memset(dev, 0, sizeof(*dev));
 	dev->dev.device_id = LKL_VIRTIO_ID_NET;
-	if (args) {
-		if (args->mac) {
-			/* do not set LKL_VIRTIO_NET_F_MAC to
-			 * dev->dev.device_feautures because it is not
-			 * supported on vhost_net */
-			dev->dev.device_features |= BIT(LKL_VIRTIO_NET_F_MAC);
-			memcpy(dev->config.mac, args->mac, LKL_ETH_ALEN);
-		}
-		//dev->dev.device_features |= offload;
+	if (args && args->mac) {
+		/* vhost_net does not support VIRTIO_NET_F_MAC, but
+		 * it is useful to configure MAC address inside LKL.
+		 * So, we expose this feature to only the LKL side.
+		 */
+		dev->dev.device_features |= BIT(LKL_VIRTIO_NET_F_MAC);
+		memcpy(dev->config.mac, args->mac, LKL_ETH_ALEN);
 	}
 	dev->dev.config_data = &dev->config;
 	dev->dev.config_len = sizeof(dev->config);
 	dev->backend_fd = backend_fd;
 
 	if ((dev->vhost_net_fd = open("/dev/vhost-net", O_RDWR)) < 0) {
-		lkl_printf("failed to open /dev/vhost-net: %s\n",
-			   strerror(errno));
+		fprintf(stderr, "failed to open /dev/vhost-net: %s\n",
+			strerror(errno));
 		ret = dev->vhost_net_fd;
 		goto out_free;
 	}
 
 	if (vhost_net_set_owner(dev) < 0) {
-		lkl_printf("failed to set vhost owner: %s\n", strerror(errno));
+		fprintf(stderr, "failed to set vhost owner: %s\n",
+			strerror(errno));
 		goto out_free;
 	}
 
@@ -644,19 +612,11 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 		goto out_close;
 	}
 
-
-
-	printf("offload is %x\n", offload);
-	if (offload & (BIT(LKL_VIRTIO_NET_F_MRG_RXBUF)))
-		printf("mrg rx buf!\n");
-	else
-		printf("No mrg rx buf!\n");
 	if (offload & BIT(LKL_VIRTIO_NET_F_GUEST_CSUM))
 		tap_arg |= TUN_F_CSUM;
 	if (offload & (BIT(LKL_VIRTIO_NET_F_GUEST_TSO4) |
 		       BIT(LKL_VIRTIO_NET_F_MRG_RXBUF))) {
 		tap_arg |= TUN_F_TSO4 | TUN_F_CSUM;
-		printf("TSO4!\n");
 	}
 	if (offload & (BIT(LKL_VIRTIO_NET_F_GUEST_TSO6)))
 		tap_arg |= TUN_F_TSO6 | TUN_F_CSUM;
@@ -674,20 +634,8 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 
 
 
-	/* drop features unsupported by vhost */
-	uint64_t f = 0;
 	vhost_net_ioctl(dev, VHOST_GET_FEATURES, &f);
-	/*
-	vf &= ~BIT(VIRTIO_F_NOTIFY_ON_EMPTY);
-	vf &= ~BIT(VIRTIO_RING_F_INDIRECT_DESC);
-	vf &= ~BIT(VIRTIO_RING_F_EVENT_IDX);
-	vf &= ~BIT(VHOST_F_LOG_ALL);
-	vf &= ~BIT(VIRTIO_F_ANY_LAYOUT);
-	vf &= ~BIT(VIRTIO_F_VERSION_1);
-	vf &= ~BIT(VHOST_NET_F_VIRTIO_NET_HDR);
-	vf &= ~BIT(VIRTIO_NET_F_MRG_RXBUF);
-	*/
-	f &= ~BIT(VIRTIO_F_IOMMU_PLATFORM);
+	f &= ~BIT(VIRTIO_F_IOMMU_PLATFORM); /* LKL does not support IOMMU */
 
 	printf("device feature is 0x%lx (original)\n", f);
 	dev->dev.device_features |= f;

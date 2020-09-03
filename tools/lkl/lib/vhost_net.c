@@ -202,9 +202,7 @@ static int vhost_net_write_driver_features(struct vhost_net_dev *dev,
 		tmp = dev->dev.driver_features & 0xFFFFFFFF00000000;
 		dev->dev.driver_features = tmp | val;
 	}
-
-	return vhost_net_ioctl(dev, VHOST_SET_FEATURES,
-			       &dev->dev.driver_features);
+	return 0;
 }
 
 static int vhost_net_set_vring_num(struct vhost_net_dev *dev, uint32_t num)
@@ -368,6 +366,7 @@ static inline void set_ptr_high(void **ptr, uint32_t val)
 static inline int set_status(struct virtio_dev *vdev, uint32_t val)
 {
 	struct vhost_net_dev *dev = netdev_of(vdev);
+	uint64_t df;
 
 	printf("%s: val 0x%x\n", __func__, val);
 	printf("%s: driver 0x%016lx\n", __func__, vdev->driver_features);
@@ -375,10 +374,13 @@ static inline int set_status(struct virtio_dev *vdev, uint32_t val)
 
 	if (val & LKL_VIRTIO_CONFIG_S_FEATURES_OK) {
 
-		if ((vdev->device_features & vdev->driver_features) == 
-		    vdev->device_features) {
-			if (vhost_net_ioctl(dev, VHOST_SET_FEATURES,
-					    &vdev->driver_features) < 0)
+		/* drop VIRTIO_NET_F_MAC feature becaust vhost-net
+		 * does not support it */
+		df = vdev->driver_features & ~BIT(LKL_VIRTIO_NET_F_MAC);
+
+		if ((df & vdev->device_features) == df) {
+			printf("%s: try set feature 0x%lx\n", __func__, df);
+			if (vhost_net_ioctl(dev, VHOST_SET_FEATURES, &df) < 0)
 				return -1;
 			vdev->status = val;
 		}
@@ -577,7 +579,7 @@ static int dev_register(struct vhost_net_dev *dev)
 {
 	if (registered_dev_idx == MAX_NET_DEVS) {
 		lkl_printf("Too many vhost_net devices!\n");
-		/* THis error code is also a little bit of a lie */
+		/* This error code is also a little bit of a lie */
 		return -LKL_ENOMEM;
 	} else {
 		registered_devs[registered_dev_idx] = dev;
@@ -612,6 +614,7 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 			/* do not set LKL_VIRTIO_NET_F_MAC to
 			 * dev->dev.device_feautures because it is not
 			 * supported on vhost_net */
+			dev->dev.device_features |= BIT(LKL_VIRTIO_NET_F_MAC);
 			memcpy(dev->config.mac, args->mac, LKL_ETH_ALEN);
 		}
 		//dev->dev.device_features |= offload;
@@ -672,7 +675,7 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 
 
 	/* drop features unsupported by vhost */
-	uint64_t f;
+	uint64_t f = 0;
 	vhost_net_ioctl(dev, VHOST_GET_FEATURES, &f);
 	/*
 	vf &= ~BIT(VIRTIO_F_NOTIFY_ON_EMPTY);
@@ -686,7 +689,8 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 	*/
 	f &= ~BIT(VIRTIO_F_IOMMU_PLATFORM);
 
-	dev->dev.device_features = f;
+	printf("device feature is 0x%lx (original)\n", f);
+	dev->dev.device_features |= f;
 	printf("device feature is 0x%lx\n", dev->dev.device_features);
 
 	dev->dev.vhost = &vhost_net;

@@ -384,8 +384,6 @@ static int virtio_read(void *data, int offset, void *res, int size)
 
 	*(uint32_t *)res = htole32(val);
 
-	lkl_printf("%s: offset is %x val is %d\n", __func__, offset, val);
-
 	return 0;
 }
 
@@ -435,7 +433,6 @@ static int virtio_write(void *data, int offset, void *res, int size)
 		return -LKL_EINVAL;
 
 	val = le32toh(*(uint32_t *)res);
-	lkl_printf("%s: offset is %x val is %d\n", __func__, offset, val);
 
 	switch (offset) {
 	case VIRTIO_MMIO_DEVICE_FEATURES_SEL:

@@ -90,8 +90,8 @@ struct vhost_net_dev {
 };
 
 
-#define vhost_net_ioctl(d, r, a) \
-	_vhost_net_ioctl(d, r, a, #r)
+#define vhost_net_ioctl(d, r, a) _vhost_net_ioctl(d, r, a, #r)
+
 static int _vhost_net_ioctl(struct vhost_net_dev *dev, unsigned int long req,
 			    void *arg, char *reqstr)
 {
@@ -215,13 +215,13 @@ static int vhost_net_set_eventfd(struct vhost_net_dev *dev)
 	struct virtio_queue *q = &vdev->queue[vdev->queue_sel];
 	struct vhost_vring_file f = { .index = vdev->queue_sel };
 
-	q->kick_fd = eventfd(0, 0);
+	q->kick_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
 	if (q->kick_fd < 0) {
 		fprintf(stderr, "eventfd(): %s\n", strerror(errno));
 		return -1;
 	}
 
-	q->call_fd = eventfd(0, 0);
+	q->call_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
 	if (q->call_fd < 0) {
 		fprintf(stderr, "eventfd(): %s\n", strerror(errno));
 		return -1;
@@ -248,9 +248,10 @@ static int vhost_net_kick(struct vhost_net_dev *dev, uint32_t qidx)
 	if (ret < 0) {
 		fprintf(stderr, "%s: write(): %s\n", __func__,
 			strerror(errno));
+		return ret;
 	}
 
-	return ret;
+	return 0;
 }
 
 static int vhost_net_set_vring_addr(struct vhost_net_dev *dev)
@@ -345,10 +346,6 @@ static inline int set_status(struct virtio_dev *vdev, uint32_t val)
 	struct vhost_net_dev *dev = netdev_of(vdev);
 	uint64_t df;
 
-	printf("%s: val 0x%x\n", __func__, val);
-	printf("%s: driver 0x%016lx\n", __func__, vdev->driver_features);
-	printf("%s: device 0x%016lx\n", __func__, vdev->device_features);
-
 	if (val & LKL_VIRTIO_CONFIG_S_FEATURES_OK) {
 
 		/* drop VIRTIO_NET_F_MAC feature becaust vhost-net
@@ -356,7 +353,6 @@ static inline int set_status(struct virtio_dev *vdev, uint32_t val)
 		df = vdev->driver_features & ~BIT(LKL_VIRTIO_NET_F_MAC);
 
 		if ((df & vdev->device_features) == df) {
-			printf("%s: try set feature 0x%lx\n", __func__, df);
 			if (vhost_net_ioctl(dev, VHOST_SET_FEATURES, &df) < 0)
 				return -1;
 			vdev->status = val;
@@ -431,7 +427,7 @@ static int vhost_net_write(void *data, int offset, void *res, int size)
 		}
 		break;
 	case VIRTIO_MMIO_QUEUE_NOTIFY:
-		vhost_net_kick(dev, val);
+		ret = vhost_net_kick(dev, val);
 		break;
 	case VIRTIO_MMIO_INTERRUPT_ACK:
 		vdev->int_status = 0;
@@ -498,33 +494,34 @@ static void vhost_net_poll_thread(void *arg)
 	struct pollfd x[NUM_QUEUES];
 	uint64_t val;
 	int ret, n;
-	int qnum = 0;
 
 	/* unlike virtio_net.c this thread polls call_fd of
 	 * virtqueues, and then invokes irq */
 
+	/* wait until TX and RX queues are prepared */
+	while (dev->qnum != NUM_QUEUES)
+		usleep(10);
+
+	for (n = 0; n < NUM_QUEUES; n++) {
+		q = &dev->dev.queue[n];
+		if (q->call_fd) {
+			x[n].fd = q->call_fd;
+			x[n].events = POLLIN;
+		}
+	}
+
 	do {
 		if (dev->pollstop)
 			break;
-		if (qnum != dev->qnum) {
-			qnum = dev->qnum;
-			for (n = 0; n < NUM_QUEUES; n++) {
-				q = &dev->dev.queue[n];
-				if (q->call_fd) {
-					x[n].fd = q->call_fd;
-					x[n].events = POLLIN;
-				}
-			}
-		}
 
 		do {
-			ret = poll(x, qnum, 1000);
+			ret = poll(x, NUM_QUEUES, 100);
 		} while (ret == -1 && errno == EINTR);
 
 		if (ret < 0)
 			perror("vhost_net poll");
 
-		for (n = 0; n < qnum; n++) {
+		for (n = 0; n < NUM_QUEUES; n++) {
 
 			if (!x[n].revents & POLLIN)
 				continue;
@@ -632,14 +629,9 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 		goto out_close;
 	}
 
-
-
 	vhost_net_ioctl(dev, VHOST_GET_FEATURES, &f);
 	f &= ~BIT(VIRTIO_F_IOMMU_PLATFORM); /* LKL does not support IOMMU */
-
-	printf("device feature is 0x%lx (original)\n", f);
 	dev->dev.device_features |= f;
-	printf("device feature is 0x%lx\n", dev->dev.device_features);
 
 	dev->dev.vhost = &vhost_net;
 

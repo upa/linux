@@ -1,6 +1,7 @@
 #include <string.h>
 #include <lkl_host.h>
 #include "virtio.h"
+#include "virtio_net.h"
 #include "endian.h"
 
 #include <lkl/linux/virtio_net.h>
@@ -160,20 +161,22 @@ void poll_thread(void *arg)
 	} while (1);
 }
 
-struct virtio_net_dev *registered_devs[MAX_NET_DEVS];
+static struct virtio_dev *registered_devs[MAX_NET_DEVS];
+static void (*registered_removes[MAX_NET_DEVS])(struct virtio_dev *, int);
 static int registered_dev_idx = 0;
 
-static int dev_register(struct virtio_net_dev *dev)
+int virtio_net_register(struct virtio_dev *dev,
+			void (*remove)(struct virtio_dev *, int))
 {
 	if (registered_dev_idx == MAX_NET_DEVS) {
 		lkl_printf("Too many virtio_net devices!\n");
 		/* This error code is a little bit of a lie */
 		return -LKL_ENOMEM;
-	} else {
-		/* registered_dev_idx is incremented by the caller */
-		registered_devs[registered_dev_idx] = dev;
-		return 0;
 	}
+
+	registered_devs[registered_dev_idx] = dev;
+	registered_removes[registered_dev_idx] = remove;
+	return registered_dev_idx++;
 }
 
 static void free_queue_locks(struct lkl_mutex **queues, int num_queues)
@@ -207,6 +210,35 @@ static struct lkl_mutex **init_queue_locks(int num_queues)
 
 	return ret;
 }
+
+static void virtio_net_remove(struct virtio_dev *vdev, int id)
+{
+	struct virtio_net_dev *dev = netdev_of(vdev);
+	int ret;
+
+	dev->nd->ops->poll_hup(dev->nd);
+	lkl_host_ops.thread_join(dev->poll_tid);
+
+	ret = lkl_netdev_get_ifindex(id);
+	if (ret < 0) {
+		lkl_printf("%s: failed to get ifindex for id %d: %s\n",
+			   __func__, id, lkl_strerror(ret));
+		return;
+	}
+
+	ret = lkl_if_down(ret);
+	if (ret < 0) {
+		lkl_printf("%s: failed to put interface id %d down: %s\n",
+			   __func__, id, lkl_strerror(ret));
+		return;
+	}
+
+	virtio_dev_cleanup(&dev->dev);
+
+	free_queue_locks(dev->queue_locks, NUM_QUEUES);
+	lkl_host_ops.mem_free(dev);
+}
+
 
 int lkl_netdev_add(struct lkl_netdev *nd, struct lkl_netdev_args* args)
 {
@@ -259,11 +291,11 @@ int lkl_netdev_add(struct lkl_netdev *nd, struct lkl_netdev_args* args)
 	if (dev->poll_tid == 0)
 		goto out_cleanup_dev;
 
-	ret = dev_register(dev);
+	ret = virtio_net_register(&dev->dev, virtio_net_remove);
 	if (ret < 0)
 		goto out_cleanup_dev;
 
-	return registered_dev_idx++;
+	return ret;
 
 out_cleanup_dev:
 	virtio_dev_cleanup(&dev->dev);
@@ -276,40 +308,10 @@ out_free:
 	return ret;
 }
 
-/* Return 0 for success, -1 for failure. */
+
 void lkl_netdev_remove(int id)
 {
-	struct virtio_net_dev *dev;
-	int ret;
-
-	if (id >= registered_dev_idx) {
-		lkl_printf("%s: invalid id: %d\n", __func__, id);
-		return;
-	}
-
-	dev = registered_devs[id];
-
-	dev->nd->ops->poll_hup(dev->nd);
-	lkl_host_ops.thread_join(dev->poll_tid);
-
-	ret = lkl_netdev_get_ifindex(id);
-	if (ret < 0) {
-		lkl_printf("%s: failed to get ifindex for id %d: %s\n",
-			   __func__, id, lkl_strerror(ret));
-		return;
-	}
-
-	ret = lkl_if_down(ret);
-	if (ret < 0) {
-		lkl_printf("%s: failed to put interface id %d down: %s\n",
-			   __func__, id, lkl_strerror(ret));
-		return;
-	}
-
-	virtio_dev_cleanup(&dev->dev);
-
-	free_queue_locks(dev->queue_locks, NUM_QUEUES);
-	lkl_host_ops.mem_free(dev);
+	registered_removes[id](registered_devs[id], id);
 }
 
 void lkl_netdev_free(struct lkl_netdev *nd)

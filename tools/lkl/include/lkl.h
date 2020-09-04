@@ -701,23 +701,6 @@ static inline void lkl_vhost_net_add(int backend_fd,
 #endif
 
 /**
- * lkl_vhost_net_remove - remove a previously added vhost network device
- *
- * Attempts to release all resources held by a vhost network device
- * created via lkl_vhost_net_add.
- *
- * @id - the network device id, as returned by @lkl_vhost_net_add
- *
- */
-#ifdef LKL_HOST_CONFIG_VHOST_NET
-void lkl_vhost_net_remove(int id);
-#else
-static inline void lkl_vhost_net_remove(int id)
-{
-}
-#endif
-
-/**
  * lkl_vhost_net_create - create lkl_netdev for vhost net device
  *
  * Just create struct lkl_netdev that is actually not needed for vhost_net

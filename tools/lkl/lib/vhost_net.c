@@ -7,14 +7,13 @@
 #include <sys/ioctl.h>
 #include <fcntl.h>
 #include <sys/poll.h>
-#include <sys/epoll.h>
 #include <linux/if.h>
 #include <linux/if_tun.h>
 #include <linux/vhost.h>
 
 #include <lkl_host.h>
 #include "virtio.h"
-
+#include "virtio_net.h"
 
 /* copied from virtio_net.c */
 
@@ -75,6 +74,7 @@
 
 struct vhost_net_dev {
 	struct virtio_dev dev;
+	struct lkl_netdev nd;
 	struct lkl_virtio_net_config config;
 
 	int vhost_net_fd;
@@ -215,13 +215,13 @@ static int vhost_net_set_eventfd(struct vhost_net_dev *dev)
 	struct virtio_queue *q = &vdev->queue[vdev->queue_sel];
 	struct vhost_vring_file f = { .index = vdev->queue_sel };
 
-	q->kick_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+	q->kick_fd = eventfd(0, EFD_NONBLOCK);
 	if (q->kick_fd < 0) {
 		fprintf(stderr, "eventfd(): %s\n", strerror(errno));
 		return -1;
 	}
 
-	q->call_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+	q->call_fd = eventfd(0, EFD_NONBLOCK);
 	if (q->call_fd < 0) {
 		fprintf(stderr, "eventfd(): %s\n", strerror(errno));
 		return -1;
@@ -468,14 +468,14 @@ static int vhost_net_write(void *data, int offset, void *res, int size)
 	return ret;
 }
 
-static struct lkl_iomem_ops vhost_net_ops = {
+static struct lkl_iomem_ops vhost_net_iomem_ops = {
 	.read	= vhost_net_read,
 	.write	= vhost_net_write,
 };
 
 static struct vhost vhost_net = {
 	.type		= LKL_VHOST_TYPE_NET,
-	.vhost_ops	= &vhost_net_ops,
+	.vhost_ops	= &vhost_net_iomem_ops,
 };
 
 
@@ -515,7 +515,7 @@ static void vhost_net_poll_thread(void *arg)
 			break;
 
 		do {
-			ret = poll(x, NUM_QUEUES, 100);
+			ret = poll(x, NUM_QUEUES, 10);
 		} while (ret == -1 && errno == EINTR);
 
 		if (ret < 0)
@@ -536,19 +536,30 @@ static void vhost_net_poll_thread(void *arg)
 	} while (1);
 }
 
-struct vhost_net_dev *registered_devs[MAX_NET_DEVS];
-static int registered_dev_idx = 0;
-
-static int dev_register(struct vhost_net_dev *dev)
+static void vhost_net_remove(struct virtio_dev *vdev, int id)
 {
-	if (registered_dev_idx == MAX_NET_DEVS) {
-		lkl_printf("Too many vhost_net devices!\n");
-		/* This error code is also a little bit of a lie */
-		return -LKL_ENOMEM;
-	} else {
-		registered_devs[registered_dev_idx] = dev;
-		return 0;
+	struct vhost_net_dev *dev = netdev_of(vdev);
+	int ret;
+
+	dev->pollstop = 1;
+	lkl_host_ops.thread_join(dev->poll_tid);
+
+	ret = lkl_netdev_get_ifindex(id);
+	if (ret < 0) {
+		lkl_printf("%s: failed to get ifindex for id %d: %s\n",
+			   __func__, id, lkl_strerror(ret));
+		return;
 	}
+
+	ret = lkl_if_down(ret);
+	if (ret < 0) {
+		lkl_printf("%s: failed to put interface id %d down: %s\n",
+			   __func__, id, lkl_strerror(ret));
+		return;
+	}
+
+	virtio_dev_cleanup(&dev->dev);
+	lkl_host_ops.mem_free(dev);
 }
 
 int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
@@ -574,6 +585,9 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 
 	memset(dev, 0, sizeof(*dev));
 	dev->dev.device_id = LKL_VIRTIO_ID_NET;
+	dev->dev.config_data = &dev->config;
+	dev->dev.config_len = sizeof(dev->config);
+	dev->backend_fd = backend_fd;
 
 	if (args && args->mac) {
 		/* vhost_net does not support VIRTIO_NET_F_MAC, but it
@@ -583,10 +597,6 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 		dev->overlay_features |= BIT(LKL_VIRTIO_NET_F_MAC);
 		memcpy(dev->config.mac, args->mac, LKL_ETH_ALEN);
 	}
-
-	dev->dev.config_data = &dev->config;
-	dev->dev.config_len = sizeof(dev->config);
-	dev->backend_fd = backend_fd;
 
 	if ((dev->vhost_net_fd = open("/dev/vhost-net", O_RDWR)) < 0) {
 		fprintf(stderr, "failed to open /dev/vhost-net: %s\n",
@@ -610,7 +620,6 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 	dev->overlay_features |= offload;
 	dev->dev.device_features = (dev->vhost_features |
 				    dev->overlay_features);
-
 
 	/* setup backend tap fd */
 	memset(&ifr, 0, sizeof(ifr));
@@ -652,11 +661,11 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 	if (dev->poll_tid == 0)
 		goto out_close;
 
-	ret = dev_register(dev);
+	ret = virtio_net_register(&dev->dev, vhost_net_remove);
 	if (ret < 0)
 		goto out_close;
 
-	return registered_dev_idx++;
+	return ret;
 
 out_close:
 	close(dev->vhost_net_fd);
@@ -666,38 +675,14 @@ out_free:
 	return ret;
 }
 
-void lkl_vhost_net_remove(int id)
+void vhost_net_free(struct lkl_netdev *nd)
 {
-	struct vhost_net_dev *dev;
-	int ret;
-
-	if (id >= registered_dev_idx) {
-		lkl_printf("%s: invalid id: %d\n", __func__, id);
-		return;
-	}
-
-	dev = registered_devs[id];
-
-	dev->pollstop = 1;
-	lkl_host_ops.thread_join(dev->poll_tid);
-
-	ret = lkl_netdev_get_ifindex(id);
-	if (ret < 0) {
-		lkl_printf("%s: failed to get ifindex for id %d: %s\n",
-			   __func__, id, lkl_strerror(ret));
-		return;
-	}
-
-	ret = lkl_if_down(ret);
-	if (ret < 0) {
-		lkl_printf("%s: failed to put interface id %d down: %s\n",
-			   __func__, id, lkl_strerror(ret));
-		return;
-	}
-
-	virtio_dev_cleanup(&dev->dev);
-	lkl_host_ops.mem_free(dev);
+	free(nd);
 }
+
+struct lkl_dev_net_ops vhost_net_dev_net_ops = {
+	.free = vhost_net_free,
+};
 
 struct lkl_netdev *lkl_vhost_net_create(void)
 {
@@ -709,6 +694,7 @@ struct lkl_netdev *lkl_vhost_net_create(void)
 			   __func__);
 		return NULL;
 	}
-	memset(nd, 0, sizeof(*nd));
+
+	nd->ops = &vhost_net_dev_net_ops;
 	return nd;
 }

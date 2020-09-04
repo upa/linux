@@ -79,9 +79,9 @@ struct vhost_net_dev {
 
 	int vhost_net_fd;
 	int backend_fd;
-	int vnet_hdr_len;
 
-	uint64_t vhost_net_features;
+	uint64_t overlay_features;	/* features exposed to guest */
+	uint64_t vhost_features;	/* actual features of vhost */
 
 	/* used for poll thread */
 	lkl_thread_t poll_tid;
@@ -344,16 +344,16 @@ static inline void set_ptr_high(void **ptr, uint32_t val)
 static inline int set_status(struct virtio_dev *vdev, uint32_t val)
 {
 	struct vhost_net_dev *dev = netdev_of(vdev);
-	uint64_t df;
+	uint64_t f, drop;
 
 	if (val & LKL_VIRTIO_CONFIG_S_FEATURES_OK) {
 
-		/* drop VIRTIO_NET_F_MAC feature becaust vhost-net
-		 * does not support it */
-		df = vdev->driver_features & ~BIT(LKL_VIRTIO_NET_F_MAC);
+		/* drop bits in only overlay_features */
+		drop = dev->overlay_features & ~dev->vhost_features;
+		f = vdev->driver_features & ~drop;
 
-		if ((df & vdev->device_features) == df) {
-			if (vhost_net_ioctl(dev, VHOST_SET_FEATURES, &df) < 0)
+		if ((f & vdev->device_features) == f) {
+			if (vhost_net_ioctl(dev, VHOST_SET_FEATURES, &f) < 0)
 				return -1;
 			vdev->status = val;
 		}
@@ -557,8 +557,7 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 	struct ifreq ifr;
 	int backend_fd, ret, tap_arg = 0;
 	int vnet_hdr_sz = sizeof(struct lkl_virtio_net_hdr_v1) ;
-	int offload = args ? args->offload : 0;
-	uint64_t f = 0;
+	uint64_t offload = args ? args->offload : 0;
 
 	backend_fd = open(path, O_RDWR);
 	if (backend_fd < 0) {
@@ -575,14 +574,16 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 
 	memset(dev, 0, sizeof(*dev));
 	dev->dev.device_id = LKL_VIRTIO_ID_NET;
+
 	if (args && args->mac) {
-		/* vhost_net does not support VIRTIO_NET_F_MAC, but
-		 * it is useful to configure MAC address inside LKL.
-		 * So, we expose this feature to only the LKL side.
+		/* vhost_net does not support VIRTIO_NET_F_MAC, but it
+		 * is useful to configure MAC address inside LKL. So,
+		 * we expose this feature to only the guest (LKL) side.
 		 */
-		dev->dev.device_features |= BIT(LKL_VIRTIO_NET_F_MAC);
+		dev->overlay_features |= BIT(LKL_VIRTIO_NET_F_MAC);
 		memcpy(dev->config.mac, args->mac, LKL_ETH_ALEN);
 	}
+
 	dev->dev.config_data = &dev->config;
 	dev->dev.config_len = sizeof(dev->config);
 	dev->backend_fd = backend_fd;
@@ -600,6 +601,18 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 		goto out_free;
 	}
 
+	/* setup device features */
+	if (vhost_net_ioctl(dev, VHOST_GET_FEATURES, &dev->vhost_features) < 0)
+		goto out_close;
+
+	/* LKL does not support IOMMU */
+	dev->vhost_features &= ~BIT(VIRTIO_F_IOMMU_PLATFORM);
+	dev->overlay_features |= offload;
+	dev->dev.device_features = (dev->vhost_features |
+				    dev->overlay_features);
+
+
+	/* setup backend tap fd */
 	memset(&ifr, 0, sizeof(ifr));
 	ifr.ifr_flags = IFF_TAP | IFF_NO_PI | IFF_VNET_HDR;
 	ret = ioctl(backend_fd, TUNSETIFF, &ifr);
@@ -629,12 +642,8 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 		goto out_close;
 	}
 
-	vhost_net_ioctl(dev, VHOST_GET_FEATURES, &f);
-	f &= ~BIT(VIRTIO_F_IOMMU_PLATFORM); /* LKL does not support IOMMU */
-	dev->dev.device_features |= f;
-
+	/* instantiate virtio device */
 	dev->dev.vhost = &vhost_net;
-
 	ret = virtio_dev_setup(&dev->dev, NUM_QUEUES, QUEUE_DEPTH);
 	if (ret)
 		goto out_close;

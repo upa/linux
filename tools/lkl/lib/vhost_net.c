@@ -370,14 +370,8 @@ static inline int set_status(struct virtio_dev *vdev, uint32_t val)
 	struct vhost_net_dev *dev = netdev_of(vdev);
 	uint64_t f;
 
-	lkl_printf("driver  0x%lx\n", vdev->driver_features);
-	lkl_printf("device  0x%lx\n", vdev->device_features);
-
 	if (val & LKL_VIRTIO_CONFIG_S_FEATURES_OK) {
-
 		f = vdev->driver_features & VHOST_NET_FEATURES;
-		lkl_printf("!!!! VHOST_SET_FEATURES 0x%lx\n", f);
-
 		if (vhost_net_ioctl(dev, VHOST_SET_FEATURES, &f) < 0)
 			return -1;
 		vdev->status = val;
@@ -636,8 +630,6 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 	/* drop bits not in offload */
 	dev->dev.device_features |= ((VHOST_NET_FEATURES & ~OFFLOAD_FEATURES) |
 				     offload);
-	printf("device feautres is 0x%lx\n", dev->dev.device_features);
-
 
 	/* setup tap offload features */
 	if (offload & BIT(LKL_VIRTIO_NET_F_GUEST_CSUM))
@@ -645,7 +637,6 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 	if (offload & (BIT(LKL_VIRTIO_NET_F_GUEST_TSO4) |
 		       BIT(LKL_VIRTIO_NET_F_MRG_RXBUF))) {
 		tap_arg |= TUN_F_TSO4 | TUN_F_CSUM;
-		printf("set mrg_rxbuf\n");
 	}
 	if (offload & BIT(LKL_VIRTIO_NET_F_GUEST_TSO6))
 		tap_arg |= TUN_F_TSO6 | TUN_F_CSUM;
@@ -671,9 +662,6 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 			path, strerror(errno));
 		goto out_close;
 	}
-
-	lkl_printf("tap_arg is 0x%x\n", tap_arg);
-	lkl_printf("device_features is 0x%lx\n", dev->dev.device_features);
 
 	/* instantiate virtio device */
 	dev->dev.vhost = &vhost_net;

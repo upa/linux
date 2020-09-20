@@ -268,6 +268,7 @@ static int vhost_net_kick(struct vhost_net_dev *dev, uint32_t qidx)
 	uint64_t v = 1;
 	int ret;
 
+	//__sync_synchronize();
 	ret = write(q->kick_fd, &v, sizeof(v));
 	if (ret < 0) {
 		fprintf(stderr, "%s: write(): %s\n", __func__,
@@ -349,6 +350,17 @@ static int vhost_net_set_vring_base(struct vhost_net_dev *dev)
 	return vhost_net_ioctl(dev, VHOST_SET_VRING_BASE, &s);
 }
 
+static int vhost_net_set_busyloop_timeout(struct vhost_net_dev *dev,
+					  int index, int timeout)
+{
+	struct vhost_vring_state s;
+
+	s.index = index;
+	s.num = timeout;
+
+	return vhost_net_ioctl(dev, VHOST_SET_VRING_BUSYLOOP_TIMEOUT, &s);
+}
+
 static inline void set_ptr_low(void **ptr, uint32_t val)
 {
 	uint64_t tmp = (uintptr_t)*ptr;
@@ -428,6 +440,7 @@ static int vhost_net_write(void *data, int offset, void *res, int size)
 			break;
 		q->log = lkl_host_ops.mem_alloc(4096);	/* XXX: ?????? */
 		ret = vhost_net_set_eventfd(dev);
+		vhost_net_set_busyloop_timeout(dev, vdev->queue_sel, 10);
 		dev->qnum++;
 		break;
 	case VIRTIO_MMIO_QUEUE_READY:
@@ -545,8 +558,11 @@ static void vhost_net_poll_thread(void *arg)
 				continue;
 
 			ret = read(x[n].fd, &val, sizeof(val));
-			if (ret < 0)
+			if (ret < 0) {
+				printf("call fd read error: %s\n",
+				       strerror(errno));
 				continue;
+			}
 
 			virtio_deliver_irq(&dev->dev);
 		}

@@ -440,9 +440,7 @@ static int vhost_net_write(void *data, int offset, void *res, int size)
 			break;
 		q->log = lkl_host_ops.mem_alloc(4096);	/* XXX: ?????? */
 		ret = vhost_net_set_eventfd(dev);
-		if (vdev->queue_sel == RX_QUEUE_IDX &&
-		    (vdev->device_features &
-		     BIT(LKL_VIRTIO_NET_F_MRG_RXBUF))) {
+		if (vdev->queue_sel == RX_QUEUE_IDX) {
 			ret = vhost_net_set_busyloop_timeout(dev,
 							     vdev->queue_sel,
 							     10);

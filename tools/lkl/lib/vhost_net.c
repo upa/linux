@@ -268,7 +268,7 @@ static int vhost_net_kick(struct vhost_net_dev *dev, uint32_t qidx)
 	uint64_t v = 1;
 	int ret;
 
-	//__sync_synchronize();
+	__sync_synchronize();
 	ret = write(q->kick_fd, &v, sizeof(v));
 	if (ret < 0) {
 		fprintf(stderr, "%s: write(): %s\n", __func__,

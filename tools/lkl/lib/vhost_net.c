@@ -7,6 +7,7 @@
 #include <sys/ioctl.h>
 #include <fcntl.h>
 #include <sys/poll.h>
+#include <dirent.h>
 #include <linux/if.h>
 #include <linux/if_tun.h>
 #include <linux/vhost.h>
@@ -602,17 +603,55 @@ static void vhost_net_remove(struct virtio_dev *vdev, int id)
 	lkl_host_ops.mem_free(dev);
 }
 
+
+
+static int ifname_to_tap_path(char *ifname, char *tappath, size_t tappath_len)
+{
+	DIR *d;
+	struct dirent *e;
+	char syspath[PATH_MAX];
+
+	/* this function converts ifname of a macvtap interface to
+	 * /dev/tapX. */
+
+	snprintf(syspath, sizeof(syspath), "/sys/class/net/%s/macvtap",
+		 ifname);
+	d = opendir(syspath);
+	if (!d)
+		return -1;
+
+	while ((e = readdir(d))) {
+		if (strncmp(e->d_name, ".", 1) == 0 ||
+		    strncmp(e->d_name, "..", 2) == 0)
+			continue;
+
+		/* /sys/class/net/IFNAME/macvtap directory contains
+		 * only tapX directory. */
+		snprintf(tappath, tappath_len, "/dev/%s", e->d_name);
+	}
+
+	return 0;
+}
+
 int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 {
 	struct vhost_net_dev *dev;
 	int backend_fd, ret, tap_arg = 0;
 	uint64_t offload = args ? args->offload : 0;
+	char tappath[PATH_MAX];
 
 	/* XXX: macvtap + vhost always includes vnethdr ? */
 	struct ifreq ifr = { .ifr_flags = IFF_TAP | IFF_NO_PI | IFF_VNET_HDR };
 	int vnet_hdr_sz = sizeof(struct lkl_virtio_net_hdr_v1);
 
-	backend_fd = open(path, O_RDWR);
+	ret = ifname_to_tap_path(path, tappath, sizeof(tappath));
+	if (ret < 0) {
+		fprintf(stderr, "failed to find /dev/tap device for %s: %s\n",
+			path, strerror(errno));
+		return -1;
+	}
+
+	backend_fd = open(tappath, O_RDWR);
 	if (backend_fd < 0) {
 		fprintf(stderr, "failed to open %s: %s\n", path,
 			strerror(errno));

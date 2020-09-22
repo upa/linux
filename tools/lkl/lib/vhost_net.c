@@ -633,7 +633,7 @@ static int ifname_to_tap_path(char *ifname, char *tappath, size_t tappath_len)
 	return 0;
 }
 
-int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
+int lkl_vhost_net_add(char *ifname, struct lkl_netdev_args *args)
 {
 	struct vhost_net_dev *dev;
 	int backend_fd, ret, tap_arg = 0;
@@ -644,16 +644,16 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 	struct ifreq ifr = { .ifr_flags = IFF_TAP | IFF_NO_PI | IFF_VNET_HDR };
 	int vnet_hdr_sz = sizeof(struct lkl_virtio_net_hdr_v1);
 
-	ret = ifname_to_tap_path(path, tappath, sizeof(tappath));
+	ret = ifname_to_tap_path(ifname, tappath, sizeof(tappath));
 	if (ret < 0) {
 		fprintf(stderr, "failed to find /dev/tap device for %s: %s\n",
-			path, strerror(errno));
+			ifname, strerror(errno));
 		return -1;
 	}
 
 	backend_fd = open(tappath, O_RDWR);
 	if (backend_fd < 0) {
-		fprintf(stderr, "failed to open %s: %s\n", path,
+		fprintf(stderr, "failed to open %s: %s\n", tappath,
 			strerror(errno));
 		return -1;
 	}
@@ -670,10 +670,31 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 	dev->dev.config_len = sizeof(dev->config);
 	dev->backend_fd = backend_fd;
 
-	if (args && args->mac) {
-		dev->dev.device_features |= BIT(LKL_VIRTIO_NET_F_MAC);
+	/* use the specified mac addr through LKL json or the assigned
+	 * one to the macvtap interface */
+	if (args && args->mac)
 		memcpy(dev->config.mac, args->mac, LKL_ETH_ALEN);
+	else {
+		struct ifreq ifrm;
+		int fdm = socket(AF_INET, SOCK_DGRAM, 0);
+		if (fdm < 0) {
+			fprintf(stderr, "failed to open socket: %s\n",
+				strerror(errno));
+			return -1;
+		}
+		memset(&ifrm, 0, sizeof(ifrm));
+		ifrm.ifr_addr.sa_family = AF_INET;
+		strncpy(ifrm.ifr_name, ifname, IFNAMSIZ - 1);
+		if (ioctl(fdm, SIOCGIFHWADDR, &ifrm) < 0) {
+			fprintf(stderr, "failed to ioctl(SIOCGIFHWADDR): %s\n",
+				strerror(errno));
+			return -1;
+		}
+		memcpy(dev->config.mac, ifrm.ifr_hwaddr.sa_data, ETH_ALEN);
+		close(fdm);
 	}
+	dev->dev.device_features |= BIT(LKL_VIRTIO_NET_F_MAC);
+
 
 	if ((dev->vhost_net_fd = open("/dev/vhost-net", O_RDWR)) < 0) {
 		fprintf(stderr, "failed to open /dev/vhost-net: %s\n",
@@ -708,19 +729,19 @@ int lkl_vhost_net_add(char *path, struct lkl_netdev_args *args)
 	/* setup backend tap fd */
 	if (ioctl(backend_fd, TUNSETIFF, &ifr) != 0) {
 		fprintf(stderr, "%s: failed to attach to: %s\n",
-			path, strerror(errno));
+			ifname, strerror(errno));
 		goto out_close;
 	}
 
 	if (ioctl(backend_fd, TUNSETVNETHDRSZ, &vnet_hdr_sz) != 0) {
 		fprintf(stderr, "%s: failed to TUNSETVNETHDRSZ to: %s\n",
-			path, strerror(errno));
+			ifname, strerror(errno));
 		goto out_close;
 	}
 
 	if (ioctl(backend_fd, TUNSETOFFLOAD, tap_arg) != 0) {
 		fprintf(stderr, "%s: failed to TUNSETOFFLOAD: %s\n",
-			path, strerror(errno));
+			ifname, strerror(errno));
 		goto out_close;
 	}
 

@@ -37,10 +37,12 @@ static inline unsigned long test_and_clear_irq_status(int index)
 	return __sync_fetch_and_and(&irq_status[index], 0);
 }
 
+#define IRQ_STATUS_BITS_MASK	(IRQ_STATUS_BITS-1)
+
 void set_irq_pending(int irq)
 {
 	int index = irq / IRQ_STATUS_BITS;
-	int bit = irq % IRQ_STATUS_BITS;
+	int bit = irq & IRQ_STATUS_BITS_MASK;
 
 	__sync_fetch_and_or(&irq_status[index], BIT(bit));
 	__sync_fetch_and_or(&irq_index_status, BIT(index));

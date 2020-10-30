@@ -129,6 +129,7 @@ struct lkl_host_operations {
 	void (*jmp_buf_longjmp)(struct lkl_jmp_buf *jmpb, int val);
 
 	void* (*memcpy)(void *dest, const void *src, unsigned long count);
+	void* (*memset)(void *s, int c, size_t count);
 
 	unsigned long memory_start, memory_size;
 };

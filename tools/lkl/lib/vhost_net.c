@@ -6,7 +6,7 @@
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <fcntl.h>
-#include <sys/poll.h>
+#include <sys/epoll.h>
 #include <dirent.h>
 #include <linux/if.h>
 #include <linux/if_tun.h>
@@ -529,8 +529,9 @@ static void vhost_net_poll_thread(void *arg)
 {
 	struct vhost_net_dev *dev = arg;
 	struct virtio_queue *q;
-	struct pollfd x[NUM_QUEUES];
+	struct epoll_event ev, evs[NUM_QUEUES];
 	uint64_t val;
+	int efd, nfds;
 	int ret, n;
 
 	/* unlike virtio_net.c this thread polls call_fd of
@@ -540,37 +541,44 @@ static void vhost_net_poll_thread(void *arg)
 	while (dev->qnum != NUM_QUEUES)
 		usleep(10);
 
+	efd = epoll_create1(0);
+	if (efd < 0) {
+		fprintf(stderr, "%s: epoll_create1: %s\n",
+			__func__, strerror(errno));
+		return;
+	}
+
 	for (n = 0; n < NUM_QUEUES; n++) {
 		q = &dev->dev.queue[n];
 		if (q->call_fd) {
-			x[n].fd = q->call_fd;
-			x[n].events = POLLIN;
+			ev.data.fd = q->call_fd;
+			ev.events = EPOLLIN;
+			ret = epoll_ctl(efd, EPOLL_CTL_ADD, q->call_fd, &ev);
+			if (ret) {
+				fprintf(stderr, "%s: epoll_ctl: %s\n",
+					__func__, strerror(errno));
+				return;
+			}
 		}
 	}
 
 	do {
 		if (dev->pollstop)
 			break;
-
 		do {
-			ret = poll(x, NUM_QUEUES, 10);
-		} while (ret == -1 && errno == EINTR);
+			nfds = epoll_wait(efd, evs, NUM_QUEUES, 10);
+		} while (nfds == 0 && errno == EINTR);
 
-		if (ret < 0)
-			perror("vhost_net poll");
+		if (nfds < 0)
+			perror("vhost_net epoll_wait");
 
-		for (n = 0; n < NUM_QUEUES; n++) {
-
-			if (!x[n].revents & POLLIN)
-				continue;
-
-			ret = read(x[n].fd, &val, sizeof(val));
+		for (n = 0; n < nfds; n++) {
+			ret = read(evs[n].data.fd, &val, sizeof(val));
 			if (ret < 0) {
 				printf("call fd read error: %s\n",
 				       strerror(errno));
 				continue;
 			}
-
 			virtio_deliver_irq(&dev->dev);
 		}
 

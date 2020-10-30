@@ -38,6 +38,33 @@ static inline void *__memset(void *s, int c, size_t count)
 	return s;
 }
 
+#define __HAVE_ARCH_MEMSET16
+static inline void *memset16(void *s, int c, size_t count)
+{
+	if (lkl_ops->memset)
+		return lkl_ops->memset(s, c, count);
+
+	return __memset(s, c, count);
+}
+
+#define __HAVE_ARCH_MEMSET32
+static inline void *memset32(void *s, int c, size_t count)
+{
+	if (lkl_ops->memset)
+		return lkl_ops->memset(s, c, count);
+
+	return __memset(s, c, count);
+}
+
+#define __HAVE_ARCH_MEMSET64
+static inline void *memset64(void *s, int c, size_t count)
+{
+	if (lkl_ops->memset)
+		return lkl_ops->memset(s, c, count);
+
+	return __memset(s, c, count);
+}
+
 #define memcpy(dst, src, len) __memcpy(dst, src, len)
 #define memset(s, c, n) __memset(s, c, n)
 

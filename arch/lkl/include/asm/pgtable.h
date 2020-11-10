@@ -45,6 +45,23 @@ extern void *empty_zero_page;
  */
 #define pgtable_cache_init()	do { } while (0)
 
+#ifndef pgprot_noncached
+#define pgprot_noncached(prot)  (prot)
+#endif
+
+#ifndef pgprot_writecombine
+#define pgprot_writecombine pgprot_noncached
+#endif
+
+#ifndef pgprot_writethrough
+#define pgprot_writethrough pgprot_noncached
+#endif
+
+#ifndef pgprot_device
+#define pgprot_device pgprot_noncached
+#endif
+
+
 /*
  * All 32bit addresses are effectively valid for vmalloc...
  * Sort of meaningless for non-VM targets.

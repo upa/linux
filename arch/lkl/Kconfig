@@ -37,6 +37,10 @@ config LKL
        select HAVE_MEMBLOCK
        select NO_BOOTMEM
        select BLK_DEV_NVME
+       select ETHERNET
+       select NET_VENDOR_MELLANOX
+       select MLX5_CORE
+       select MLX5_CORE_EN
 
 config OUTPUT_FORMAT
        string "Output format"

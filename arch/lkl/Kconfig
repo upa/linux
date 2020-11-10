@@ -42,6 +42,10 @@ config LKL
        select HAVE_ARCH_KASAN
        select TLS
        select UNIX
+       select ETHERNET
+       select NET_VENDOR_MELLANOX
+       select MLX5_CORE
+       select MLX5_CORE_EN
 
 config LKL_FUZZING
        bool "LLVM fuzzing instrumentation"

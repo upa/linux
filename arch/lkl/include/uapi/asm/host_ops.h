@@ -27,6 +27,7 @@ struct lkl_pci_dev;
  * @map_page - return the DMA address of pages; vaddr might not be page-aligned
  * @unmap_page - cleanup DMA region if needed
  *
+ * @get_irq - get an irq associating this device
  */
 struct lkl_dev_pci_ops {
 	struct lkl_pci_dev *(*add)(const char *name, void *kernel_ram,
@@ -42,6 +43,7 @@ struct lkl_dev_pci_ops {
 				       unsigned long size);
 	void (*unmap_page)(struct lkl_pci_dev *dev,
 			   unsigned long long dma_handle, unsigned long size);
+	int (*get_irq)(struct lkl_pci_dev *dev);
 };
 
 enum lkl_prot {

@@ -269,3 +269,27 @@ error:
 }
 
 subsys_initcall(lkl_pci_init);
+
+
+/* MSI-X */
+
+#include <linux/msi.h>
+
+int arch_setup_msi_irq(struct pci_dev *dev, struct msi_desc *desc)
+{
+	int irq, ret;
+
+	irq = lkl_ops->pci_ops->get_irq(dev->sysdata);
+	if (irq < 0) {
+		pr_err("%s: no irq available on %s\n", __func__, pcidev_name);
+		return -ENOSPC;
+	}
+
+	ret = irq_set_msi_desc(irq, desc);
+	if (ret < 0) {
+		pr_err("%s: irq_set_msi_desc failed %d\n", __func__, ret);
+		return ret;
+	}
+
+	return 0;
+}

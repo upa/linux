@@ -4,7 +4,7 @@
 
 #include "iomem.h"
 
-#define IOMEM_OFFSET_BITS		24
+#define IOMEM_OFFSET_BITS		28
 #define MAX_IOMEM_REGIONS		256
 
 #define IOMEM_ADDR_TO_INDEX(addr) \

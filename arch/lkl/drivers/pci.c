@@ -86,7 +86,7 @@ static int lkl_pci_override_resource(struct pci_dev *dev, void *data)
 		}
 	}
 
-	dev->irq = lkl_get_free_irq("pci");
+	//dev->irq = lkl_get_free_irq("pci");
 
 	if (lkl_ops->pci_ops->irq_init(dev->sysdata, dev->irq) < 0)
 		return -ENOMEM;

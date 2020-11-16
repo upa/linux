@@ -16,7 +16,13 @@
 #include <linux/vfio.h>
 #include <sys/eventfd.h>
 #include <sys/epoll.h>
+#include <sys/syscall.h>
 #include "iomem.h"
+
+struct lkl_vfio_irq {
+	int irq;	/* irq num obtained from lkl */
+	int efd;	/* eventfd for VFIO */
+};
 
 struct lkl_pci_dev {
 	struct lkl_sem *thread_init_sem;
@@ -31,8 +37,10 @@ struct lkl_pci_dev {
 	struct vfio_iommu_type1_dma_map dma_map;
 
 #define MAX_IRQ		128
-	int msi_irq[MAX_IRQ];
-	int msi_irq_next; /* point the idx of next free irq in msi_irq */
+	int 		epollfd;	/* epoll fd for efd of MSIX */
+	struct lkl_vfio_irq virq[MAX_IRQ];	/* IRQs registered to VFIO */
+	int nvirq;	/* number of virq registered */
+	struct lkl_mutex *irq_lock;
 };
 
 /**
@@ -162,6 +170,7 @@ static void vfio_pci_remove(struct lkl_pci_dev *dev)
 	free(dev);
 }
 
+#if 0
 static int check_irq_status(struct lkl_pci_dev *dev)
 {
 	unsigned short status;
@@ -261,51 +270,98 @@ init_error:
 handling_error:
 	lkl_printf("lkl_vfio_pci: unknown error in the interrupt handler\n");
 }
+#endif
 
 static void vfio_msix_thread(void *_dev)
 {
 	struct lkl_pci_dev *dev = (struct lkl_pci_dev *)_dev;
-	struct vfio_irq_info irq_info;
-	struct vfio_irq_set *irq_set;
-	struct epoll_event ev;
-	unsigned int n;
-	int irq_set_len;
-	int efd, epollfd, irq;
+	struct epoll_event evs[MAX_IRQ];
+	int n, nfds, ret;
 
-	struct vfio_irq {
-		int efd;	/* eventfd */
-		int irq;	/* lkl irq number */
-	} irqs[MAX_IRQ];
-	memset(irqs, 0, sizeof(irqs));
-
-	printf("=============strat vfio_msix_thread\n");
-
-	irq_info.argsz = sizeof(irq_info);
-	irq_info.index = VFIO_PCI_MSIX_IRQ_INDEX;
-	if (ioctl(dev->fd, VFIO_DEVICE_GET_IRQ_INFO, &irq_info)) {
-		fprintf(stderr, "%s: failed to get MSIX irq info: %s\n",
+	dev->irq_lock = lkl_host_ops.mutex_alloc(0);
+	if (!dev->irq_lock) {
+		fprintf(stderr, "%s: failed to alloc mutex: %s\n",
 			__func__, strerror(errno));
 		return;
 	}
-	printf("flags is 0x%x\n", irq_info.flags);
 
 	/* prepare epollfd for polling event FDs associating IRQs */
-	epollfd = epoll_create1(0);
-	if (epollfd < 0) {
+	dev->epollfd = syscall(SYS_epoll_create1, 0);
+	if (dev->epollfd < 0) {
 		fprintf(stderr, "%s: failed to create epoll fd: %s\n",
 			__func__, strerror(errno));
 		return;
 	}
-	printf("epollfd is %d\n", epollfd);
 
+	lkl_host_ops.sem_up(dev->thread_init_sem);
 
-	/* set eventfd to each irq of MSIX */
-	irq_set_len = sizeof(*irq_set) + (sizeof(int) * irq_info.count);
+	/* watch IRQs */
+	while (1){
+
+		if (dev->quit)
+			return;
+
+		do {
+			nfds = syscall(SYS_epoll_wait, dev->epollfd, evs,
+				       MAX_IRQ, 100);
+		} while (nfds == 0);
+		if (nfds < 0 && errno != EINTR) {
+			fprintf(stderr, "%s: epoll_wait error: %s\n",
+				__func__, strerror(errno));
+			break;
+		}
+
+		for (n = 0; n < nfds; n++) {
+			struct lkl_vfio_irq *i;
+			uint64_t v;
+
+			i = (struct lkl_vfio_irq *)evs[n].data.ptr;
+			ret = read(i->efd, &v, sizeof(v));
+			if (ret < 0) {
+				fprintf(stderr,
+					"%s: read eventfd failed: %s\n",
+					__func__, strerror(errno));
+			}
+			lkl_trigger_irq(i->irq);
+		}
+	}
+}
+
+static int vfio_disable_irqs(struct lkl_pci_dev *dev)
+{
+	struct vfio_irq_set irq_set = {
+		.argsz = sizeof(irq_set),
+		.flags = VFIO_IRQ_SET_DATA_NONE | VFIO_IRQ_SET_ACTION_TRIGGER,
+		.index = VFIO_PCI_MSIX_IRQ_INDEX,
+		.start = 0,
+		.count = 0,
+	};
+
+	if (dev->nvirq - 1 == 0)
+		return 0;
+
+	if (ioctl(dev->fd, VFIO_DEVICE_SET_IRQS, &irq_set) < 0) {
+		fprintf(stderr, "%s: ioctl VFIO_DEVICE_SET_IRQS failed: %s\n",
+			__func__, strerror(errno));
+		return -1;
+	}
+
+	return 0;
+}
+
+static int vfio_register_irqs(struct lkl_pci_dev *dev)
+{
+	struct vfio_irq_set *irq_set;
+	int irq_set_len;
+	int n, ret = 0;
+
+	/* register the eventfd as a VFIO IRQ */
+	irq_set_len = sizeof(*irq_set) + (sizeof(int) * dev->nvirq);
 	irq_set = malloc(irq_set_len);
 	if (!irq_set) {
-		fprintf(stderr, "%s: failed to allocate memory: %s\n",
+		fprintf(stderr, "%s: failed to malloc irq_set: %s\n",
 			__func__, strerror(errno));
-		return;
+		return -1;
 	}
 	memset(irq_set, 0, irq_set_len);
 	irq_set->argsz = irq_set_len;
@@ -313,79 +369,77 @@ static void vfio_msix_thread(void *_dev)
 			  VFIO_IRQ_SET_ACTION_TRIGGER);
 	irq_set->index = VFIO_PCI_MSIX_IRQ_INDEX;
 	irq_set->start = 0;
-	irq_set->count = irq_info.count;
-	for (n = 0; n < irq_info.count; n++) {
-		efd = eventfd(0, EFD_CLOEXEC);
-		if (efd < 0) {
-			fprintf(stderr, "%s: failed to create eventfd: %s\n",
-				__func__, strerror(errno));
-			return;
-		}
-
-		irq = lkl_get_free_irq("vfio");
-		if (irq < 0) {
-			fprintf(stderr, "%s: failed to get free irq: %s\n",
-				__func__, strerror(errno));
-			return;
-		}
-		dev->msi_irq[n] = irq;
-
-		irqs[n].efd = efd;
-		irqs[n].irq = irq;
-
-		/* add the event fd to epoll with assocating IRQ */
-		memset(&ev, 0, sizeof(ev));
-		ev.events = EPOLLIN | EPOLLPRI;
-		ev.data.ptr = &irqs[n];
-		if (epoll_ctl(epollfd, EPOLL_CTL_ADD, efd, &ev) < 0) {
-			fprintf(stderr,
-				"%s: failed to add eventfd to epoll: %s\n",
-				__func__, strerror(errno));
-			return;
-		}
-
-		*(int *)(irq_set->data + (sizeof(int) * n)) = efd;
-		printf("irq %d -> efd %d\n", irq, efd);
+	irq_set->count = dev->nvirq;
+	for (n = 0; n < dev->nvirq; n++) {
+		*(((int *)&irq_set->data) + n) = dev->virq[n].efd;
 	}
 
 	if (ioctl(dev->fd, VFIO_DEVICE_SET_IRQS, irq_set) < 0) {
-		fprintf(stderr, "%s: failed to set MSIX IRQs to VFIO: %s\n",
+		fprintf(stderr, "%s: VFIO_DEVICE_SET_IRQS failed: %s\n",
 			__func__, strerror(errno));
-		return;
+		return -1;
 	}
-	printf("Ok, now MSIX is set\n");
-	lkl_host_ops.sem_up(dev->thread_init_sem);
 
-	/* watch IRQs */
-	struct epoll_event evs[irq_info.count];
-	ssize_t s;
-	int ret, m;
+	return ret;
+}
 
-	while (1){
-		do {
-			ret = epoll_wait(epollfd, evs, irq_info.count, 0);
-		} while (ret == 0 && errno == EINTR);
-		if (ret < 0) {
-			fprintf(stderr, "%s: epoll_wait error: %s\n",
-				__func__, strerror(errno));
-			break;
-		}
+static int vfio_get_irq(struct lkl_pci_dev *dev)
+{
+	struct lkl_vfio_irq *virq;
+	struct epoll_event ev;
+	int efd, irq;
+	int ret = 0;
 
-		for (m = 0; m < ret; m++) {
-			struct vfio_irq *i;
-			uint64_t v;
+	/* retrive a free irq from lkl and register it to vfio */
 
-			i = (struct vfio_irq *)evs[m].data.ptr;
-			s = read(i->efd, &v, sizeof(v));
-			if (s < 0) {
-				fprintf(stderr,
-					"%s: read eventfd failed: %s\n",
-					__func__, strerror(errno));
-			}
-			printf("!!!!!!!!!!! trigger irq %d\n", i->irq);
-			lkl_trigger_irq(i->irq);
+	lkl_host_ops.mutex_lock(dev->irq_lock);
+
+	irq = lkl_get_free_irq_vfio("pci");
+	if (irq < 0) {
+		fprintf(stderr, "%s: no available irq on lkl\n", __func__);
+		ret = -1;
+		goto out;
+	}
+
+	efd = eventfd(0, EFD_CLOEXEC);
+	if (efd < 0) {
+		fprintf(stderr, "%s: failed to create eventfd: %s\n",
+			__func__, strerror(errno));
+		ret = -1;
+		goto out;
+	}
+
+	virq = &dev->virq[dev->nvirq++];
+	virq->irq = irq;
+	virq->efd = efd;
+
+	/* add the event fd to epoll for associating IRQ */
+	memset(&ev, 0, sizeof(ev));
+	ev.events = EPOLLIN | EPOLLPRI;
+	ev.data.ptr = virq;
+	ret = syscall(SYS_epoll_ctl, dev->epollfd, EPOLL_CTL_ADD, efd, &ev);
+	if (ret < 0) {
+		fprintf(stderr, "%s: failed to add event fd to epoll: %s\n",
+			__func__, strerror(errno));
+		ret = -1;
+		goto out;
+	}
+	/* register the eventfd into VFIO IRQ */
+	vfio_disable_irqs(dev);
+	vfio_register_irqs(dev);
+
+	int n;
+	for (n = 0; n < dev->nvirq; n++) {
+		if (dev->virq[n].irq == irq) {
+			printf("%s: IRQ %d -> VFIO IRQ %d eventfd %d\n",
+			       __func__,
+			       dev->virq[n].irq, n, dev->virq[n].efd);
 		}
 	}
+
+out:
+	lkl_host_ops.mutex_unlock(dev->irq_lock);
+	return irq;
 }
 
 static int vfio_pci_irq_init(struct lkl_pci_dev *dev, int irq)
@@ -538,24 +592,6 @@ static void *vfio_resource_alloc(struct lkl_pci_dev *dev,
 		return NULL;
 
 	return register_iomem(mmio_addr, resource_size, &pci_resource_ops);
-}
-
-static int vfio_get_irq(struct lkl_pci_dev *dev)
-{
-	int irq;
-
-	irq = dev->msi_irq[dev->msi_irq_next];
-	if (irq == 0) {
-		fprintf(stderr, "%s: no available irq, %d used\n",
-			__func__, dev->msi_irq_next);
-		return -1;
-	}
-
-	dev->msi_irq_next++;
-
-	printf("%s: return %d\n", __func__, irq);
-
-	return irq;
 }
 
 struct lkl_dev_pci_ops vfio_pci_ops = {

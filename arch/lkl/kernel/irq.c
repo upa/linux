@@ -1,6 +1,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/irq.h>
+#include <linux/msi.h>
 #include <linux/hardirq.h>
 #include <asm/irq_regs.h>
 #include <linux/sched.h>
@@ -146,6 +147,32 @@ int lkl_get_free_irq(const char *user)
 		if (!irqs[i].user) {
 			irqs[i].user = user;
 			irq_set_chip_and_handler(i, &dummy_irq_chip, handle_simple_irq);
+			ret = i;
+			break;
+		}
+	}
+
+	return ret;
+}
+
+static struct irq_chip lkl_vfio_irq_chip = {
+	.name		= "LKL-VFIO",
+	.irq_enable	= pci_msi_unmask_irq,
+	.irq_disable	= pci_msi_mask_irq,
+	.irq_unmask	= pci_msi_unmask_irq,
+};
+
+int lkl_get_free_irq_vfio(const char *user)
+{
+	int i;
+	int ret = -EBUSY;
+
+	/* 0 is not a valid IRQ */
+	for (i = 1; i < NR_IRQS; i++) {
+		if (!irqs[i].user) {
+			irqs[i].user = user;
+			irq_set_chip_and_handler(i, &lkl_vfio_irq_chip,
+						 handle_simple_irq);
 			ret = i;
 			break;
 		}

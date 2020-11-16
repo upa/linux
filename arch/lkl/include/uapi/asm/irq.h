@@ -23,6 +23,8 @@ int lkl_trigger_irq(int irq);
  */
 int lkl_get_free_irq(const char *user);
 
+int lkl_get_free_irq_vfio(const char *user);
+
 /**
  * lkl_put_irq - release an IRQ number previously obtained with lkl_get_free_irq
  *

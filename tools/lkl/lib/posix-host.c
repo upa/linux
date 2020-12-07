@@ -374,7 +374,8 @@ static void timer_free(void *_timer)
 	struct timer_thread_body *t = _timer;
 
 	close(t->tfd);
-	pthread_join(t->tid, NULL);
+	pthread_cancel(t->tid);
+	WARN_PTHREAD(pthread_join(t->tid, NULL));
 	free(t);
 }
 

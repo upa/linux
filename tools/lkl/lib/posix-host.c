@@ -18,6 +18,12 @@
 #include "iomem.h"
 #include "jmp_buf.h"
 
+#define USE_TIMERFD
+
+#ifdef USE_TIMERFD
+#include <sys/timerfd.h>
+#endif
+
 /* Let's see if the host has semaphore.h */
 #include <unistd.h>
 
@@ -258,6 +264,8 @@ static unsigned long long time_ns(void)
 	return 1e9*ts.tv_sec + ts.tv_nsec;
 }
 
+
+#ifndef USE_TIMERFD
 static void *timer_alloc(void (*fn)(void *), void *arg)
 {
 	int err;
@@ -296,6 +304,81 @@ static void timer_free(void *_timer)
 
 	timer_delete(timer);
 }
+
+#else /* USE_TIMERFD*/
+
+struct timer_thread_body {
+	pthread_t tid;
+	int tfd;
+	void (*fn)(void *);
+	void *arg;
+};
+
+static void *timer_thread(void *arg)
+{
+	struct timer_thread_body *t = arg;
+	int ret = 0;
+	uint64_t v;
+
+	while (ret >= 0) {
+		ret = read(t->tfd, &v, sizeof(v));
+		if (ret > 0) {
+			t->fn(t->arg);
+		}
+	}
+
+	return NULL;
+}
+
+static void *timer_alloc(void (*fn)(void *), void *arg)
+{
+	struct timer_thread_body *t;
+
+	t = malloc(sizeof(*t));
+	if (!t) {
+		lkl_printf("%s: failed to alloc timer thread: %s\n",
+			   __func__, strerror(errno));
+		return NULL;
+	}
+	memset(t, 0, sizeof(*t));
+
+	t->tfd = timerfd_create(CLOCK_REALTIME, 0);
+	t->fn = fn;
+	t->arg = arg;
+
+	if (WARN_PTHREAD(pthread_create(&t->tid, NULL, timer_thread, t))) {
+		lkl_printf("%s: failed to create timer thread: %s\n",
+			   __func__, strerror(errno));
+		free(t);
+		return NULL;
+	}
+
+	return t;
+}
+
+static int timer_set_oneshot(void *_timer, unsigned long ns)
+{
+	struct timer_thread_body *t = _timer;
+	struct itimerspec ts = {
+		.it_value = {
+			.tv_sec = ns / 1000000000,
+			.tv_nsec = ns % 1000000000,
+		},
+	};
+
+	return timerfd_settime(t->tfd, 0, &ts, NULL);
+}
+
+static void timer_free(void *_timer)
+{
+	struct timer_thread_body *t = _timer;
+
+	close(t->tfd);
+	pthread_join(t->tid, NULL);
+	free(t);
+}
+
+#endif /* USE_TIMERFD */
 
 static void panic(void)
 {

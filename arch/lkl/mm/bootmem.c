@@ -18,7 +18,11 @@ void __init bootmem_init(unsigned long mem_sz)
 		mem_size = PAGE_ALIGN(mem_size);
 		_memory_start = (unsigned long)lkl_ops->page_alloc(mem_size);
 	} else {
-		_memory_start = (unsigned long)lkl_ops->mem_alloc(mem_size);
+		if (lkl_ops->dpdkio_ops && lkl_ops->dpdkio_ops->malloc) {
+			void *p = lkl_ops->dpdkio_ops->malloc(mem_size);
+			_memory_start = (unsigned long)p;
+		} else
+			_memory_start = (unsigned long)lkl_ops->mem_alloc(mem_size);
 	}
 
 	memory_start = _memory_start;

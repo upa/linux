@@ -134,6 +134,7 @@ headers.add("arch/lkl/include/uapi/asm/host_ops.h")
 find_headers("include/uapi/linux/uhid.h")
 find_headers("include/uapi/linux/input-event-codes.h")
 headers.add("arch/lkl/include/uapi/asm/usrcall.h")
+headers.add("arch/lkl/include/uapi/asm/dpdkio.h")
 
 if 'LKL_INSTALL_ADDITIONAL_HEADERS' in os.environ:
     with open(os.environ['LKL_INSTALL_ADDITIONAL_HEADERS'], 'rU') as f:

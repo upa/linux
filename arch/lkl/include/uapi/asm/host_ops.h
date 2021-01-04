@@ -10,6 +10,70 @@ struct lkl_jmp_buf {
 	unsigned long buf[128];
 };
 
+/* dpdkio */
+struct lkl_dpdkio_pkt;	/* defined in dpdkio.h */
+
+struct lkl_dpdkio_ops {
+
+	/* preparation */
+
+	void *(*malloc)(int size);	/* used to alloc bootmem */
+
+	int (*init_rxring)(void *addr, int size);
+	/* pass a buffer region inside the bootmem and its
+	 * size. dpdkio_init_rxing creates a heap on the region,
+	 * creates mempool on the heap, and set it as rx mempool for a
+	 * underlaying ethernet device. */
+
+	int (*setup)(int nb_tx_desc, int nb_rx_desc);
+	/* setup a dpdkio device */
+
+	int (*start)(void); /* start dpdkio */
+
+
+
+	/* RX path */
+
+	int (*rx)(struct lkl_dpdkio_pkt *pkts, int nb_pkts);
+	/* receive upto `nb_pkts` packets from the ring to `pkts`
+	 * array. It retruns number of packets received. */
+
+	void (*mbuf_free)(void *mbuf);
+	/* this is actually rte_pktmbuf_free() to release
+	 * dpdkio_pkt->mbuf in the RX path. It is called to release
+	 * mbuf when corresponding skb is consumed at the end of RX
+	 * path. */
+
+
+	/* TX path */
+
+	int (*tx)(struct lkl_dpdkio_pkt *pkts, int nb_pkts);
+	/* transmit upto `nb_pkts` packets in `pkts` array to a
+	 * underlaying ethernet device. It returns number of packets
+	 * transmitted. */
+
+	void (*free_skb)(void *skb);
+	/* this is actually kfree_skb to release dpdkio_pkt->skb in
+	 * the TX path. It is called to release skb when the
+	 * corresponding mbuf is released at the end of TX path.
+	 *
+	 * NOTE: only this function is set by the lkl kernel-side
+	 * (arch/lkl/kernel/dpdkio.c) 'before' dpdkio_start() is
+	 * called, unlike other functions are set by lib/dpdkio.c.
+	 */
+
+
+	/* misc */
+
+	int (*get_macaddr)(char *mac);
+	/* copy MAC address of underlaying ethernet device to `mac`. */
+
+	/* XXX: may need feature negotiation for, e.g., offloading
+	 * capability. */
+
+	/* XXX: we need portid on dpdk to handle multiple dpdkio ports */
+};
+
 /**
  * lkl_host_operations - host operations used by the Linux kernel
  *
@@ -130,6 +194,8 @@ struct lkl_host_operations {
 
 	void* (*memcpy)(void *dest, const void *src, unsigned long count);
 	void* (*memset)(void *s, int c, unsigned long count);
+
+	struct lkl_dpdkio_ops *dpdkio_ops;
 
 	unsigned long memory_start, memory_size;
 };

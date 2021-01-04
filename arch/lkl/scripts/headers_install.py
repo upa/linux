@@ -129,6 +129,7 @@ args = parser.parse_args()
 find_headers("arch/lkl/include/uapi/asm/syscalls.h")
 headers.add("arch/lkl/include/uapi/asm/host_ops.h")
 headers.add("arch/lkl/include/uapi/asm/usrcall.h")
+headers.add("arch/lkl/include/uapi/asm/dpdkio.h")
 
 if 'LKL_INSTALL_ADDITIONAL_HEADERS' in os.environ:
     with open(os.environ['LKL_INSTALL_ADDITIONAL_HEADERS'], 'rU') as f:

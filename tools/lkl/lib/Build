@@ -26,3 +26,4 @@ liblkl-$(LKL_HOST_CONFIG_VFIO_PCI) += vfio_pci.o
 liblkl-$(LKL_HOST_CONFIG_VHOST_NET) += vhost_net.o
 liblkl-y += config.o
 liblkl-y += usrcall.o
+liblkl-y += dpdkio.o

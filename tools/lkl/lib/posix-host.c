@@ -21,6 +21,11 @@
 #include "iomem.h"
 #include "jmp_buf.h"
 
+#define DPDKIO
+#ifdef DPDKIO
+#include "dpdkio.h"
+#endif
+
 #define USE_TIMERFD
 
 #ifdef USE_TIMERFD
@@ -533,7 +538,12 @@ struct lkl_host_operations lkl_host_ops = {
 #ifdef LKL_HOST_CONFIG_VFIO_PCI
 	.pci_ops = &vfio_pci_ops,
 #endif
+#ifdef DPDKIO
+	.dpdkio_ops = &dpdkio_ops,
+#endif
 };
+
+
 
 static int fd_get_capacity(struct lkl_disk disk, unsigned long long *res)
 {

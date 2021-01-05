@@ -65,7 +65,7 @@ struct lkl_dpdkio_ops {
 
 	/* misc */
 
-	int (*get_macaddr)(char *mac);
+	void (*get_macaddr)(char *mac);
 	/* copy MAC address of underlaying ethernet device to `mac`. */
 
 	/* XXX: may need feature negotiation for, e.g., offloading

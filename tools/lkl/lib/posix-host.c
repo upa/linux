@@ -21,8 +21,7 @@
 #include "iomem.h"
 #include "jmp_buf.h"
 
-#define DPDKIO
-#ifdef DPDKIO
+#ifdef LKL_HOST_CONFIG_DPDKIO
 #include "dpdkio.h"
 #endif
 
@@ -538,7 +537,7 @@ struct lkl_host_operations lkl_host_ops = {
 #ifdef LKL_HOST_CONFIG_VFIO_PCI
 	.pci_ops = &vfio_pci_ops,
 #endif
-#ifdef DPDKIO
+#ifdef LKL_HOST_CONFIG_DPDKIO
 	.dpdkio_ops = &dpdkio_ops,
 #endif
 };

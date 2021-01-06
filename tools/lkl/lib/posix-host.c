@@ -18,10 +18,6 @@
 #include "iomem.h"
 #include "jmp_buf.h"
 
-#ifdef LKL_HOST_CONFIG_DPDKIO
-#include "dpdkio.h"
-#endif
-
 #define USE_TIMERFD
 
 #ifdef USE_TIMERFD
@@ -398,6 +394,10 @@ static long _gettid(void)
 	return syscall(SYS_gettid);
 #endif
 }
+
+#ifdef LKL_HOST_CONFIG_DPDKIO
+#include "dpdkio.h"
+#endif
 
 struct lkl_host_operations lkl_host_ops = {
 	.panic = panic,

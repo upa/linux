@@ -19,22 +19,24 @@ struct lkl_dpdkio_ops {
 
 	void *(*malloc)(int size);	/* used to alloc bootmem */
 
-	int (*init_rxring)(void *addr, int size);
+	int (*init_port)(int portid);	/* initialize a dpdkio port */
+
+	int (*init_rxring)(int portid, unsigned long addr, int size);
 	/* pass a buffer region inside the bootmem and its
 	 * size. dpdkio_init_rxing creates a heap on the region,
 	 * creates mempool on the heap, and set it as rx mempool for a
 	 * underlaying ethernet device. */
 
-	int (*setup)(int nb_tx_desc, int nb_rx_desc);
+	int (*setup)(int portid, int *nb_rx_desc, int *nb_tx_desc);
 	/* setup a dpdkio device */
 
-	int (*start)(void); /* start dpdkio */
-
+	int (*start)(int portid); /* start dpdkio port */
+	int (*stop)(int portid);	/* stop dpdkio port */
 
 
 	/* RX path */
 
-	int (*rx)(struct lkl_dpdkio_pkt *pkts, int nb_pkts);
+	int (*rx)(int portid, struct lkl_dpdkio_pkt *pkts, int nb_pkts);
 	/* receive upto `nb_pkts` packets from the ring to `pkts`
 	 * array. It retruns number of packets received. */
 
@@ -47,7 +49,7 @@ struct lkl_dpdkio_ops {
 
 	/* TX path */
 
-	int (*tx)(struct lkl_dpdkio_pkt *pkts, int nb_pkts);
+	int (*tx)(int portid, struct lkl_dpdkio_pkt *pkts, int nb_pkts);
 	/* transmit upto `nb_pkts` packets in `pkts` array to a
 	 * underlaying ethernet device. It returns number of packets
 	 * transmitted. */
@@ -65,7 +67,7 @@ struct lkl_dpdkio_ops {
 
 	/* misc */
 
-	void (*get_macaddr)(char *mac);
+	void (*get_macaddr)(int portid, char *mac);
 	/* copy MAC address of underlaying ethernet device to `mac`. */
 
 	/* XXX: may need feature negotiation for, e.g., offloading

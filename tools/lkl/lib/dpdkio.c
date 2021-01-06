@@ -267,6 +267,33 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 
 static int dpdkio_start(int portid)
 {
+	int ret;
+
+	ret = rte_eth_dev_start(portid);
+	if (ret < 0) {
+		pr_err("rte_eth_dev_start: %s\n", strerror(ret * 1));
+		return ret;
+	}
+
+	ret = rte_eth_dev_set_link_up(portid);
+	if (ret < 0) {
+		pr_err("rte_eth_dev_set_link_up: %s\n", strerror(ret * 1));
+		return ret;
+	}
+
+	return 0;
+}
+
+static int dpdkio_stop(int portid)
+{
+	int ret;
+
+	ret = rte_eth_dev_stop(portid);
+	if (ret < 0) {
+		pr_err("rte_eth_dev_stop: %s\n", strerror(ret * 1));
+		return ret;
+	}
+
 	return 0;
 }
 
@@ -304,17 +331,33 @@ static void dpdkio_get_macaddr(int portid, char *mac)
 	memcpy(mac, addr.addr_bytes, LKL_ETH_ALEN);
 }
 
+static int dpdkio_get_link_stat(int portid)
+{
+	struct rte_eth_link link;
+	int ret;
+
+	ret = rte_eth_link_get_nowait(portid, &link);
+	if (ret < 0) {
+		pr_err("rte_eth_link_get_nowait: %s\n", strerror(ret * -1));
+		return -1;
+	}
+
+	return link.link_status; /* ETH_LINK_UP 1 or ETH_LINK_DOWN 0 */
+}
+
 struct lkl_dpdkio_ops dpdkio_ops = {
-	.malloc		= dpdkio_malloc,
-	.init_port	= dpdkio_init_port,
-	.init_rxring	= dpdkio_init_rxring,
-	.setup		= dpdkio_setup,
-	.start		= dpdkio_start,
-	.rx		= dpdkio_rx,
-	.mbuf_free	= dpdkio_mbuf_free,
-	.tx		= dpdkio_tx,
-	.free_skb	= dpdkio_free_skb,
-	.get_macaddr	= dpdkio_get_macaddr,
+	.malloc			= dpdkio_malloc,
+	.init_port		= dpdkio_init_port,
+	.init_rxring		= dpdkio_init_rxring,
+	.setup			= dpdkio_setup,
+	.start			= dpdkio_start,
+	.stop			= dpdkio_stop,
+	.rx			= dpdkio_rx,
+	.mbuf_free		= dpdkio_mbuf_free,
+	.tx			= dpdkio_tx,
+	.free_skb		= dpdkio_free_skb,
+	.get_macaddr		= dpdkio_get_macaddr,
+	.get_link_status	= dpdkio_get_link_stat,
 };
 
 

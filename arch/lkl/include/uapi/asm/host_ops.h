@@ -70,10 +70,11 @@ struct lkl_dpdkio_ops {
 	void (*get_macaddr)(int portid, char *mac);
 	/* copy MAC address of underlaying ethernet device to `mac`. */
 
+	int (*get_link_status)(int portid);
+	/* get link status of underlaying ethernet device */
+
 	/* XXX: may need feature negotiation for, e.g., offloading
 	 * capability. */
-
-	/* XXX: we need portid on dpdk to handle multiple dpdkio ports */
 };
 
 /**

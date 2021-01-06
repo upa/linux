@@ -52,6 +52,12 @@ define virtio_net_vde
   LDLIBS += $(shell pkg-config --libs vdeplug)
 endef
 
+define driver_dpdkio
+  $(call set_autoconf_var,DPDKIO,y)
+  CFLAGS += $(shell pkg-config --cflags libdpdk)
+  LDFLAGS += $(shell pkg-config --libs --static libdpdk)
+endef
+
 define posix_host
   $(call set_autoconf_var,POSIX,y)
   $(call set_autoconf_var,VIRTIO_NET,y)
@@ -65,6 +71,7 @@ define posix_host
   $(if $(filter $(1),elf64-littleaarch64),$(call aarch64_host))
   $(if $(filter yes,$(dpdk)),$(call virtio_net_dpdk))
   $(if $(filter yes,$(vde)),$(call virtio_net_vde))
+  $(if $(filter yes,$(dpdkio)),$(call driver_dpdkio))
   $(if $(strip $(call find_include,fuse.h)),$(call set_autoconf_var,FUSE,y))
   $(if $(strip $(call find_include,archive.h)),$(call set_autoconf_var,ARCHIVE,y))
   $(if $(strip $(call find_include,linux/if_tun.h)),$(call set_autoconf_var,VIRTIO_NET_MACVTAP,y))

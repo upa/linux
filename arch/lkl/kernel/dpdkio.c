@@ -1,5 +1,5 @@
 
-#define pr_fmt(fmt) "dpdkio:%s:" fmt, __func__
+#define pr_fmt(fmt) "%s: " fmt, __func__
 
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -13,17 +13,15 @@
 static struct list_head dpdkio_list;	/* struct dpdkio_dev */
 
 /* dpdkio device */
-
-#define DPDKIO_SLOT_NUM		1024
-#define DPDKIO_MEMPOOL_SIZE	(4096 * DPDKIO_SLOT_NUM)
-
 struct dpdkio_dev {
 	struct list_head	list;
 
-	void	*rx_mempool;	/* mempool region for rx */
+	int	port;		/* dpdk port id */
 
-	struct lkl_dpdkio_pkt	txslots[DPDKIO_SLOT_NUM];
-	struct lkl_dpdkio_pkt	rxslots[DPDKIO_SLOT_NUM];
+	void	*rx_mem_region;	/* mempool region for rx */
+
+	struct lkl_dpdkio_pkt	txslots[LKL_DPDKIO_SLOT_NUM];
+	struct lkl_dpdkio_pkt	rxslots[LKL_DPDKIO_SLOT_NUM];
 
 	struct net_device	*dev;
 };
@@ -61,6 +59,7 @@ static const struct net_device_ops dpdkio_netdev_ops = {
 
 static int dpdkio_init_netdev(struct net_device *dev)
 {
+	struct dpdkio_dev *dpdk = netdev_priv(dev);
 	char mac[ETH_ALEN];
 	int ret;
 
@@ -69,7 +68,7 @@ static int dpdkio_init_netdev(struct net_device *dev)
 	dev->netdev_ops = &dpdkio_netdev_ops;
 	/* XXX: ethtool_ops */
 
-	strlcpy(dev->name, "dpdkio", sizeof(dev->name));
+	snprintf(dev->name, sizeof(dev->name), "dpdkio%d", dpdk->port);
 
 	dev->features = (NETIF_F_SG |
 			 NETIF_F_TSO |
@@ -82,7 +81,7 @@ static int dpdkio_init_netdev(struct net_device *dev)
 	dev->min_mtu = ETH_MIN_MTU;
 	dev->max_mtu = 9216;
 
-	lkl_ops->dpdkio_ops->get_macaddr(mac);
+	lkl_ops->dpdkio_ops->get_macaddr(dpdk->port, mac);
 	memcpy(dev->dev_addr, mac, dev->addr_len);
 
 	if (!is_valid_ether_addr(dev->dev_addr)) {
@@ -101,10 +100,11 @@ static int dpdkio_init_netdev(struct net_device *dev)
 	return 0;
 }
 
-static int dpdkio_init_dev(void)
+static int dpdkio_init_dev(int port)
 {
 	struct dpdkio_dev *dpdk;
 	struct net_device *dev;
+	int nb_rxd, nb_txd;
 	int ret = 0;
 
 	dev = alloc_etherdev(sizeof(struct dpdkio_dev));
@@ -116,39 +116,55 @@ static int dpdkio_init_dev(void)
 	dpdk = netdev_priv(dev);
 	memset(dpdk, 0, sizeof(*dpdk));
 	dpdk->dev = dev;
+	dpdk->port = port;
+
+	ret = lkl_ops->dpdkio_ops->init_port(dpdk->port);
+	if (ret < 0) {
+		pr_err("failed to init underlaying dpdkio port\n");
+		goto free_dpdkio;
+	}
 
 	/* prepare rx pool */
-	dpdk->rx_mempool = kmalloc(DPDKIO_MEMPOOL_SIZE, GFP_KERNEL);
-	if (!dpdk->rx_mempool) {
-		pr_err("failed to allocate memory for rx mempool\n");
+	dpdk->rx_mem_region = kmalloc(LKL_DPDKIO_MEMPOOL_SIZE, GFP_KERNEL);
+	if (!dpdk->rx_mem_region) {
+		pr_err("failed to allocate memory for rx mempool %d-byte\n",
+		       LKL_DPDKIO_MEMPOOL_SIZE);
 		ret = -ENOMEM;
 		goto free_dpdkio;
 	}
-	memset(dpdk->rx_mempool, 0, DPDKIO_MEMPOOL_SIZE);
+	memset(dpdk->rx_mem_region, 0, LKL_DPDKIO_MEMPOOL_SIZE);
 
-	ret = lkl_ops->dpdkio_ops->init_rxring(dpdk->rx_mempool,
-					       DPDKIO_MEMPOOL_SIZE);
+	ret = lkl_ops->dpdkio_ops->init_rxring(dpdk->port,
+					       (uintptr_t)dpdk->rx_mem_region,
+					       LKL_DPDKIO_MEMPOOL_SIZE);
 	if (ret < 0)
-		goto free_rx_mempool;
+		goto free_rx_mem_region;
 
-	ret = lkl_ops->dpdkio_ops->setup(DPDKIO_SLOT_NUM, DPDKIO_SLOT_NUM);
+	nb_rxd = LKL_DPDKIO_SLOT_NUM;
+	nb_txd = LKL_DPDKIO_SLOT_NUM;
+	ret = lkl_ops->dpdkio_ops->setup(dpdk->port, &nb_rxd, &nb_txd);
 	if (ret < 0)
-		goto free_rx_mempool;
+		goto free_rx_mem_region;
 
 	ret = dpdkio_init_netdev(dev);
 	if (ret < 0)
-		goto free_rx_mempool;
+		goto free_rx_mem_region;
+
+
+	pr_info("netdev %s, nb_rxd=%d nb_txd=%d, rx mempool 0x%lx, loaded\n",
+		netdev_name(dev), nb_txd, nb_rxd,
+		(uintptr_t)dpdk->rx_mem_region);
 
 	return ret;
 
-free_rx_mempool:
-	kfree(dpdk->rx_mempool);
+free_rx_mem_region:
+	kfree(dpdk->rx_mem_region);
 free_dpdkio:
 	kfree(dpdk);
 	return ret;
 }
 
-static int __init lkl_dpdkio_init(void)
+static int __init dpdkio_init(void)
 {
 	int ret;
 
@@ -159,7 +175,7 @@ static int __init lkl_dpdkio_init(void)
 
 	dpdkio_prepare();
 
-	ret = dpdkio_init_dev();
+	ret = dpdkio_init_dev(0); /* XXX: first port for the time being */
 	if (ret < 0)
 		return ret;
 
@@ -168,4 +184,4 @@ static int __init lkl_dpdkio_init(void)
 	return ret;
 }
 
-device_initcall(lkl_dpdkio_init);
+device_initcall(dpdkio_init);

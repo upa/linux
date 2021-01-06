@@ -21,10 +21,6 @@
 #include "iomem.h"
 #include "jmp_buf.h"
 
-#ifdef LKL_HOST_CONFIG_DPDKIO
-#include "dpdkio.h"
-#endif
-
 #define USE_TIMERFD
 
 #ifdef USE_TIMERFD
@@ -492,6 +488,10 @@ static int lkl_munmap(void *addr, unsigned long size)
 
 #ifdef LKL_HOST_CONFIG_VFIO_PCI
 extern struct lkl_dev_pci_ops vfio_pci_ops;
+#endif
+
+#ifdef LKL_HOST_CONFIG_DPDKIO
+#include "dpdkio.h"
 #endif
 
 struct lkl_host_operations lkl_host_ops = {

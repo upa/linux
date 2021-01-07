@@ -14,7 +14,8 @@ struct lkl_dpdkio_pkt {
 
 #define LKL_DPDKIO_PAGE_SIZE		4096
 
-#define LKL_DPDKIO_SLOT_NUM		512
+#define LKL_DPDKIO_SLOT_NUM		512	/* must be power of 2*/
+#define LKL_DPDKIO_SLOT_MASK		(LKL_DPDKIO_SLOT_NUM - 1)
 
 #define LKL_DPDKIO_MEMPOOL_SURPLUS	512
 

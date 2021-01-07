@@ -19,6 +19,8 @@ struct lkl_dpdkio_ops {
 
 	void *(*malloc)(int size);	/* used to alloc bootmem */
 
+	void (*free)(void *addr);	/* used to free bootmem */
+
 	int (*init_port)(int portid);	/* initialize a dpdkio port */
 
 	int (*init_rxring)(int portid, unsigned long addr, int size);

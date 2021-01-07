@@ -164,7 +164,7 @@ int lkl_set_ipv4_gateway(unsigned int addr)
 	return lkl_add_gateway(LKL_AF_INET, &addr);
 }
 
-int lkl_netdev_get_ifindex(int id)
+int lkl_netdev_get_ifindex_by_name(const char *ifname)
 {
 	struct lkl_ifreq ifr;
 	int sock, ret;
@@ -173,11 +173,20 @@ int lkl_netdev_get_ifindex(int id)
 	if (sock < 0)
 		return sock;
 
-	snprintf(ifr.lkl_ifr_name, sizeof(ifr.lkl_ifr_name), "eth%d", id);
+	strncpy(ifr.lkl_ifr_name, ifname, sizeof(ifr.lkl_ifr_name) - 1);
 	ret = lkl_sys_ioctl(sock, LKL_SIOCGIFINDEX, (long)&ifr);
 	lkl_sys_close(sock);
 
 	return ret < 0 ? ret : ifr.lkl_ifr_ifindex;
+}
+
+int lkl_netdev_get_ifindex(int id)
+{
+	char ifname[LKL_IFNAMSIZ];
+
+	snprintf(ifname, sizeof(ifname), "eth%d", id);
+
+	return lkl_netdev_get_ifindex_by_name(ifname);
 }
 
 static int netlink_sock(unsigned int groups)

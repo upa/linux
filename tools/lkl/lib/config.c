@@ -493,6 +493,8 @@ static int lkl_config_netdev_create(struct lkl_config *cfg,
 			nd = lkl_netdev_pipe_create(iface->ifparams, offload);
 		} else if ((strcmp(iface->iftype, "vhost-net") == 0)) {
 			nd = lkl_vhost_net_create();
+		} else if ((strcmp(iface->iftype, "dpdkio") == 0)) {
+			nd = lkl_dpdkio_create();
 		} else {
 			if (offload) {
 				lkl_printf("WARN: %s isn't supported on %s\n",
@@ -531,7 +533,12 @@ static int lkl_config_netdev_create(struct lkl_config *cfg,
 
 		if (strcmp(iface->iftype, "vhost-net") == 0)
 			ret = lkl_vhost_net_add(iface->ifparams, &nd_args);
-		else {
+		if (strcmp(iface->iftype, "dpdkio") == 0) {
+			/* XXX: how to create a dpdkio device from the
+			 * beckend side? do we need a new syscall like
+			 * virtio? */
+			ret = -1;
+		} else {
 			ret = lkl_netdev_add(nd, &nd_args);
 			if (ret < 0) {
 				lkl_printf("failed to add netdev: %s\n",
@@ -557,15 +564,21 @@ static int lkl_config_netdev_configure(struct lkl_config *cfg,
 		return -1;
 	}
 
-	if (nd->id >= 0) {
+	if (nd->id >= 0)
 		nd_ifindex = lkl_netdev_get_ifindex(nd->id);
-		if (nd_ifindex > 0)
-			lkl_if_up(nd_ifindex);
-		else
-			lkl_printf(
-				"failed to get ifindex for netdev id %d: %s\n",
-				nd->id, lkl_strerror(nd_ifindex));
-	}
+	else if (strcmp(iface->iftype, "dpdkio") == 0)
+		nd_ifindex = lkl_netdev_get_ifindex_by_name(iface->ifparams);
+
+	if (nd_ifindex < 0)
+		lkl_printf("ifindex for netdev %s id %d not found\n",
+			   iface->iftype, nd->id);
+
+	if (nd_ifindex > 0)
+		lkl_if_up(nd_ifindex);
+	else
+		lkl_printf(
+			"failed to get ifindex for netdev id %d: %s\n",
+			nd->id, lkl_strerror(nd_ifindex));
 
 	if (nd_ifindex >= 0 && iface->ifmtu_str) {
 		int mtu = atoi(iface->ifmtu_str);

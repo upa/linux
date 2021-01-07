@@ -715,7 +715,30 @@ lkl_vhost_net_create(void)
 }
 #endif
 
+/**
+ * lkl_dpdkio_create - create lkl_netdev for dpdkio device
+ *
+ * Just create struct lkl_netdev that is actually not needed for dpdkio
+ */
+#ifdef LKL_HOST_CONFIG_DPDKIO
+struct lkl_netdev *lkl_dpdkio_create(void);
+#else
+static inline struct lkl_netdev *
+lkl_dpdkio_create(void)
+{
+	return NULL;
+}
+#endif
 
+
+/**
+ * lkl_netdev_get_ifindex_by_name - retrieve the interface index for a
+ * given network device name
+ *
+ * @ifname - the network device name
+ * @returns the interface index or a stricly negative value in case of error
+ */
+int lkl_netdev_get_ifindex_by_name(const char *ifname);
 
 /**
  * lkl_netdev_get_ifindex - retrieve the interface index for a given network

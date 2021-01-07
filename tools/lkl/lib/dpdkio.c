@@ -81,8 +81,14 @@ static inline struct dpdkio_port *dpdkio_port_get(int portid)
 
 
 
-static void *dpdkio_malloc(int size) {
+static void *dpdkio_malloc(int size)
+{
 	return rte_malloc(NULL, size, 0);
+}
+
+static void dpdkio_free(void *addr)
+{
+	rte_free(addr);
 }
 
 static int dpdkio_init_port(int portid)
@@ -312,11 +318,6 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_pkt *pkts, int nb_pkts)
 	return 0;
 }
 
-static void dpdkio_free_skb(void *skb)
-{
-	return;
-}
-
 static void dpdkio_get_macaddr(int portid, char *mac)
 {
 	struct rte_ether_addr addr;
@@ -331,7 +332,7 @@ static void dpdkio_get_macaddr(int portid, char *mac)
 	memcpy(mac, addr.addr_bytes, LKL_ETH_ALEN);
 }
 
-static int dpdkio_get_link_stat(int portid)
+static int dpdkio_get_link_status(int portid)
 {
 	struct rte_eth_link link;
 	int ret;
@@ -347,6 +348,7 @@ static int dpdkio_get_link_stat(int portid)
 
 struct lkl_dpdkio_ops dpdkio_ops = {
 	.malloc			= dpdkio_malloc,
+	.free			= dpdkio_free,
 	.init_port		= dpdkio_init_port,
 	.init_rxring		= dpdkio_init_rxring,
 	.setup			= dpdkio_setup,
@@ -355,10 +357,36 @@ struct lkl_dpdkio_ops dpdkio_ops = {
 	.rx			= dpdkio_rx,
 	.mbuf_free		= dpdkio_mbuf_free,
 	.tx			= dpdkio_tx,
-	.free_skb		= dpdkio_free_skb,
+	.free_skb		= NULL,	/* fillled by lkl/kernel/dpdkio.c */
 	.get_macaddr		= dpdkio_get_macaddr,
-	.get_link_status	= dpdkio_get_link_stat,
+	.get_link_status	= dpdkio_get_link_status,
 };
+
+
+void dpdkio_lkl_netdev_free(struct lkl_netdev *nd)
+{
+	free(nd);
+}
+
+struct lkl_dev_net_ops dpdkio_dev_net_ops = {
+	.free = dpdkio_lkl_netdev_free,
+};
+
+struct lkl_netdev *lkl_dpdkio_create(void)
+{
+	struct lkl_netdev *nd;
+
+	nd = malloc(sizeof(*nd));
+	if (!nd) {
+		lkl_printf("%s: dpdkio: failed to allocate memory\n",
+			   __func__);
+		return NULL;
+	}
+	memset(nd, 0, sizeof(*nd));
+
+	nd->ops = &dpdkio_dev_net_ops;
+	return nd;
+}
 
 
 #endif /* LKL_HOST_CONFIG_DPDKIO */

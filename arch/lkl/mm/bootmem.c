@@ -70,7 +70,10 @@ void free_initmem(void)
 
 void free_mem(void)
 {
-	lkl_ops->mem_free((void *)_memory_start);
+	if (lkl_ops->dpdkio_ops && lkl_ops->dpdkio_ops->free)
+		lkl_ops->dpdkio_ops->free((void *)_memory_start);
+	else
+		lkl_ops->mem_free((void *)_memory_start);
 }
 
 

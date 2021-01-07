@@ -1,6 +1,7 @@
 #ifndef _ASM_UAPI_LKL_DPDKIO_H
 #define _ASM_UAPI_LKL_DPDKIO_H
 
+#define LKL_DPDKIO_MAX_BURST	128
 #define LKL_DPDKIO_MAX_SEGS	32
 
 struct lkl_dpdkio_pkt {
@@ -10,6 +11,8 @@ struct lkl_dpdkio_pkt {
 
 	void 	*mbuf;	/* pointer to struct mbuf of this packet */
 	void	*skb;	/* pointer to struct sk_buff of this packet */
+
+	char opaque[32];	/* used as rte_mbuf_ext_sahred_info */
 };
 
 #define LKL_DPDKIO_PAGE_SIZE		4096

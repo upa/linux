@@ -58,6 +58,8 @@ int lkl_dpdkio_init(int argc, char **argv)
 struct dpdkio_port {
 	int portid;
 
+	rte_iova_t	iova_start;	/* start iova of bootmem */
+
 	/* rx */
 	uintptr_t	rx_region;	/* passed through init_rxring */
 	int		rx_region_size;
@@ -120,6 +122,19 @@ static int dpdkio_init_port(int portid)
 	snprintf(port->tx_mempool_name, DPDKIO_MEM_NAME_MAX,
 		 "txpool-%d", portid);
 
+	/* tx mbuf can be small because packet payload is allocated
+	 * along with sk_buff. It is attached as extmem. */
+	port->tx_mempool = rte_pktmbuf_pool_create(port->tx_mempool_name,
+						   LKL_DPDKIO_SLOT_NUM,
+						   LKL_DPDKIO_SLOT_NUM / 4,
+						   0, 64,
+						   rte_socket_id());
+	if (!port->tx_mempool) {
+		pr_err("faield to create tx mbuf pool %s: %s\n",
+		       port->tx_mempool_name, strerror(rte_errno));
+		return rte_errno * -1;
+	}
+
 	return 0;
 }
 
@@ -146,6 +161,7 @@ static int dpdkio_init_rxring(int portid, unsigned long addr, int size)
 		       lkl_host_ops.memory_start);
 		return -EINVAL;
 	}
+	port->iova_start = iova_start;	/* save the start of iova */
 
 	/* prepare 4k-byte-aligned iova array */
 	iova_rx = iova_start + (addr - lkl_host_ops.memory_start);
@@ -313,9 +329,93 @@ static void dpdkio_mbuf_free(void *mbuf)
 	return;
 }
 
+static void dpdkio_extmem_free_cb(void *addr, void *opaque)
+{
+	struct lkl_dpdkio_pkt *pkt = opaque;
+
+	pr_info("free skb 0x%lx from dpdk\n", (uintptr_t)pkt->skb);
+
+	lkl_host_ops.dpdkio_ops->free_skb(pkt->skb);
+	pkt->skb = NULL;
+	__sync_synchronize();
+}
+
+static struct rte_mbuf_ext_shared_info *
+dpdkio_get_mbuf_shared_info(struct lkl_dpdkio_pkt *pkt)
+{
+	return (struct rte_mbuf_ext_shared_info *)pkt->opaque;
+}
+
+static inline rte_iova_t dpdkio_seg_iova(struct dpdkio_port *port,
+					 struct lkl_iovec *seg)
+{
+	unsigned long iova;
+
+	iova = (port->iova_start +
+		((uintptr_t)seg->iov_base) - lkl_host_ops.memory_start);
+
+	return (rte_iova_t)iova;
+}
+
 static int dpdkio_tx(int portid, struct lkl_dpdkio_pkt *pkts, int nb_pkts)
 {
-	return 0;
+	struct dpdkio_port *port = dpdkio_port_get(portid);
+	struct rte_mbuf *mbufs[LKL_DPDKIO_MAX_BURST], *prev;
+	struct rte_mbuf *mbufs_tx[LKL_DPDKIO_MAX_BURST];
+	struct rte_mbuf_ext_shared_info *shinfo;
+	struct lkl_dpdkio_pkt *pkt;
+	int ret, n, i, nsegs, mbufcnt, mbufs_tx_cnt;
+
+	nsegs = 0;
+	for (n = 0; n < nb_pkts; n++) {
+		pkt = &pkts[n];
+		nsegs += pkt->nsegs;
+	}
+
+	mbufcnt = 0;
+	ret = rte_pktmbuf_alloc_bulk(port->tx_mempool, mbufs, nsegs);
+	if (ret < 0)
+		return ret;
+
+	/* attach packets to mbufs */
+	mbufs_tx_cnt = 0;
+	for (n = 0; n < nb_pkts; n++) {
+
+		pkt = &pkts[n];
+		shinfo = dpdkio_get_mbuf_shared_info(pkt);
+		shinfo->free_cb = dpdkio_extmem_free_cb;
+		shinfo->fcb_opaque = pkt;
+		rte_mbuf_ext_refcnt_set(shinfo, 1);
+
+		prev = NULL;
+
+		for (i = 0; i < pkt->nsegs; i++) {
+			struct lkl_iovec *seg = &pkt->segs[i];
+			struct rte_mbuf *mbuf = mbufs[mbufcnt++];
+
+			rte_pktmbuf_attach_extbuf(mbuf,
+						  seg->iov_base,
+						  dpdkio_seg_iova(port, seg),
+						  seg->iov_len,
+						  (i == 0) ? shinfo : NULL);
+			mbuf->pkt_len = seg->iov_len;
+			mbuf->data_len = seg->iov_len;
+
+			if (prev == NULL) {
+				/* the first mbuf of this packet */
+				prev = mbuf;
+				mbufs_tx[mbufs_tx_cnt++] = mbuf;
+			} else
+				rte_pktmbuf_attach(mbuf, prev);
+		}
+
+		/* debug */
+		rte_pktmbuf_dump(stdout, mbufs_tx[mbufs_tx_cnt - 1], 16);
+	}
+
+	ret = rte_eth_tx_burst(port->portid, 0, mbufs_tx, nb_pkts);
+
+	return ret;
 }
 
 static void dpdkio_get_macaddr(int portid, char *mac)

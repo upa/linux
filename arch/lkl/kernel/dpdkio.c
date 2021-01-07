@@ -16,14 +16,23 @@ static struct list_head dpdkio_list;	/* struct dpdkio_dev */
 struct dpdkio_dev {
 	struct list_head	list;
 
-	int	portid;		/* dpdk port id */
-
+	int			portid;	/* dpdk port id */
 	struct net_device	*dev;	/* netdevice */
 
 	void	*rx_mem_region;	/* mempool region for rx */
 
 	struct lkl_dpdkio_pkt	txslots[LKL_DPDKIO_SLOT_NUM];
 	struct lkl_dpdkio_pkt	rxslots[LKL_DPDKIO_SLOT_NUM];
+	uint32_t		txhead;
+	uint32_t		rxhead;
+
+	/* txslots and rxslots are managed in a skimped circular queue
+	 * manner; it does not have `tail`, because releasing mbuf
+	 * (TX) and skb (RX) is done in a asynchronous manner. For
+	 * transmitting or receiving a pakcet, xxslots[xxhead] is
+	 * used. If xxslots[xxhead] is still being used (mbuf or skb
+	 * is not NULL), it means slot is full, wait.
+	 */
 };
 
 

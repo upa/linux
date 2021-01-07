@@ -74,6 +74,8 @@ void free_mem(void)
 {
 	if (lkl_ops->page_free)
 		lkl_ops->page_free((void *)_memory_start, mem_size);
+	else if (lkl_ops->dpdkio_ops && lkl_ops->dpdkio_ops->free)
+		lkl_ops->dpdkio_ops->free((void *)_memory_start);
 	else
 		lkl_ops->mem_free((void *)_memory_start);
 }

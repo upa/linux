@@ -113,9 +113,89 @@ static int dpdkio_close(struct net_device *dev)
 	return 0;
 }
 
+static void dpdkio_debug_pkt(struct lkl_dpdkio_pkt *pkt, const char *prefix)
+{
+	pr_info("%s: nsegs=%d pkt_len=%u skb=0x%lx\n",
+		prefix, pkt->nsegs, pkt->pkt_len, (uintptr_t)pkt->skb);
+}
+
 static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 				     struct net_device *dev)
 {
+	struct dpdkio_dev *dpdk = netdev_priv(dev);
+	struct skb_frag_struct *frag;
+	struct lkl_dpdkio_pkt *pkt;
+	unsigned int data_len, size;
+	unsigned short f;
+	struct iovec *seg;
+	int ret;
+
+	/* XXX: we assume that there is no race conditions on the
+	 * dpdkio TX path because of LKL */
+
+	pkt = &dpdk->txslots[dpdk->txhead];
+	if (READ_ONCE(pkt->skb)) {
+		/* slot is not released yet */
+		dev->stats.tx_dropped++;
+		return NETDEV_TX_BUSY;
+	}
+
+	/* let's fill the pkt slot */
+	pkt->pkt_len = skb->len;
+	pkt->nsegs = skb_shinfo(skb)->nr_frags + 1;
+	if (unlikely(pkt->nsegs > LKL_DPDKIO_MAX_SEGS)) {
+		net_err_ratelimited("too many frags %d (> %d)\n",
+				    pkt->nsegs, LKL_DPDKIO_MAX_SEGS);
+		goto out_drop;
+	}
+
+	/* the first segment, usually header */
+	seg = &pkt->segs[0];
+	seg->iov_base = skb->data;	/* yeah, we are in LKL, va == pa */
+	seg->iov_len = skb_headlen(skb);
+
+	/* append frags */
+	data_len = skb->data_len;
+	for (f = 0; f < skb_shinfo(skb)->nr_frags; f++) {
+		seg = &pkt->segs[1 + f];
+		frag = &skb_shinfo(skb)->frags[f];
+
+		size = skb_frag_size(frag);
+
+		seg->iov_base = skb_frag_address(frag);
+		seg->iov_len = size;
+
+		data_len -= size;
+	}
+
+	if (unlikely(data_len)) {
+		net_err_ratelimited("remaining %u bytes!\n", data_len);
+		dev->stats.tx_dropped++;
+		goto out_drop;
+	}
+
+	/* set skb to pkt to free skb when mbuf is released */
+	pkt->skb = skb;
+
+	/* XXX: pass the pkt slot to dpdk backend. we need to batch
+	 * packets. How to handle that? check enqueued packets in
+	 * qdisc? or check xmit_more?
+	 */
+	ret = lkl_ops->dpdkio_ops->tx(dpdk->portid, pkt, 1);
+	if (unlikely(ret))
+		dev->stats.tx_carrier_errors++;
+
+	/* advance the txhead */
+	dpdk->txhead = (dpdk->txhead + 1) & LKL_DPDKIO_SLOT_MASK;
+	/* XXX: do we need memory barrier? */
+
+	dpdkio_debug_pkt(pkt, "tx");
+
+	return NETDEV_TX_OK;
+
+out_drop:
+	dev_kfree_skb_any(skb);
+
 	return NETDEV_TX_OK;
 }
 
@@ -233,6 +313,11 @@ free_dpdkio:
 	return ret;
 }
 
+static void dpdkio_kfree_skb(void *skb)
+{
+	kfree_skb((struct sk_buff *)skb);
+}
+
 static int __init dpdkio_init(void)
 {
 	int ret;
@@ -243,6 +328,7 @@ static int __init dpdkio_init(void)
 	pr_info("start to init lkl dpdkio\n");
 
 	dpdkio_prepare();
+	lkl_ops->dpdkio_ops->free_skb = dpdkio_kfree_skb;
 
 	ret = dpdkio_init_dev(0); /* XXX: first port for the time being */
 	if (ret < 0)

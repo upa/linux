@@ -330,7 +330,7 @@ static int __init dpdkio_init(void)
 	dpdkio_prepare();
 	lkl_ops->dpdkio_ops->free_skb = dpdkio_kfree_skb;
 
-	ret = dpdkio_init_dev(0); /* XXX: first port for the time being */
+	ret = dpdkio_init_dev(2); /* XXX: first port for the time being */
 	if (ret < 0)
 		return ret;
 

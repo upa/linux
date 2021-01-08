@@ -38,9 +38,13 @@ struct lkl_dpdkio_ops {
 
 	/* RX path */
 
-	int (*rx)(int portid, struct lkl_dpdkio_pkt *pkts, int nb_pkts);
+	int (*rx)(int portid, struct lkl_dpdkio_pkt **pkts, int nb_pkts);
 	/* receive upto `nb_pkts` packets from the ring to `pkts`
 	 * array. It retruns number of packets received. */
+
+	void (*enable_rx_interrupt)(int portid);
+	void (*disable_rx_interrupt)(int portid);
+	/* polling is mapped to napi */
 
 	void (*mbuf_free)(void *mbuf);
 	/* this is actually rte_pktmbuf_free() to release

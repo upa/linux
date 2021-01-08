@@ -320,13 +320,22 @@ static int dpdkio_stop(int portid)
 	return 0;
 }
 
-static int dpdkio_rx(int portid, struct lkl_dpdkio_pkt *pkts, int nb_pkts)
+static void dpdkio_enable_rx_interrupt(int portid)
+{
+}
+
+static void dpdkio_disable_rx_interrupt(int portid)
+{
+}
+
+static int dpdkio_rx(int portid, struct lkl_dpdkio_pkt **pkts, int nb_pkts)
 {
 	return 0;
 }
 
 static void dpdkio_mbuf_free(void *mbuf)
 {
+	rte_pktmbuf_free((struct rte_mbuf *)mbuf);
 	return;
 }
 
@@ -456,6 +465,8 @@ struct lkl_dpdkio_ops dpdkio_ops = {
 	.start			= dpdkio_start,
 	.stop			= dpdkio_stop,
 	.rx			= dpdkio_rx,
+	.enable_rx_interrupt	= dpdkio_enable_rx_interrupt,
+	.disable_rx_interrupt	= dpdkio_disable_rx_interrupt,
 	.mbuf_free		= dpdkio_mbuf_free,
 	.tx			= dpdkio_tx,
 	.free_skb		= NULL,	/* fillled by lkl/kernel/dpdkio.c */

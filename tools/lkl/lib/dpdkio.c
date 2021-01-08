@@ -387,6 +387,11 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot *slots, int nb_pkts)
 	if (ret < 0)
 		return ret;
 
+	/* XXX: we need to handle over LKL_DPDKIO_MAX_BURST packets
+	 * and segments. usually, ndo_start_xmit is called per packet.
+	 * we might consider xmit_more for more performance.
+	 */
+
 	/* attach packets to mbufs */
 	mbufs_tx_cnt = 0;
 	for (n = 0; n < nb_pkts; n++) {

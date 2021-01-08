@@ -115,6 +115,7 @@ static int dpdkio_init_port(int portid)
 		return -EBUSY;
 	}
 
+	port->portid = portid;
 	snprintf(port->rx_heap_name, DPDKIO_MEM_NAME_MAX,
 		 "rxheap-%d", portid);
 	snprintf(port->rx_mempool_name, DPDKIO_MEM_NAME_MAX,
@@ -413,7 +414,7 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_pkt *pkts, int nb_pkts)
 		rte_pktmbuf_dump(stdout, mbufs_tx[mbufs_tx_cnt - 1], 16);
 	}
 
-	ret = rte_eth_tx_burst(port->portid, 0, mbufs_tx, nb_pkts);
+	ret = rte_eth_tx_burst(portid, 0, mbufs_tx, nb_pkts);
 
 	return ret;
 }

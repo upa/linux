@@ -33,8 +33,9 @@ struct dpdkio_dev {
 	 * used. If xxslots[xxhead] is still being used (mbuf or skb
 	 * is not NULL), it means slot is full, wait.
 	 */
-};
 
+	struct napi_struct	napi;
+};
 
 static void dpdkio_prepare(void)
 {
@@ -199,6 +200,123 @@ out_drop:
 	return NETDEV_TX_OK;
 }
 
+static bool dpdkio_can_reuse_rx_page(struct lkl_dpdkio_pkt *pkt)
+{
+	struct page *page;
+	int n;
+
+	/* XXX: ??????? */
+
+	for (n = 0; n < pkt->nsegs; n++) {
+		page = virt_to_page(pkt->segs[n].iov_base);
+		if (page_ref_count(page) > 1) {
+			return false;
+		}
+	}
+
+	/* ok, we can reuse this slot, check mbuf is attached */
+	if (READ_ONCE(pkt->mbuf)) {
+		lkl_ops->dpdkio_ops->mbuf_free(pkt->mbuf);
+		WRITE_ONCE(pkt->mbuf, NULL);
+	}
+
+	return true;
+}
+
+struct sk_buff *dpdkio_rx_pkt_to_skb(struct dpdkio_dev *dpdk,
+				     struct lkl_dpdkio_pkt *pkt)
+{
+	struct sk_buff *skb;
+	struct iovec *seg;
+	struct page *page;
+	uint64_t offset, phy_addr;
+	int n;
+
+	/* build an skb to around the first segment */
+	seg = &pkt->segs[0];
+	skb = build_skb(seg->iov_base, seg->iov_len);
+	if (!skb)
+		return NULL;
+	skb_put(skb, seg->iov_len);
+
+	for (n = 1; n < pkt->nsegs; n++) {
+		seg = &pkt->segs[n];
+		phy_addr = (uintptr_t)seg->iov_base;
+
+		/* Note: in lkl, va = pa (asm-generic/io.h and
+		 * page.h), so there is no need to use
+		 * phys_to_virt. */
+		page = virt_to_page(phys_to_virt(phy_addr));
+		offset = phys_to_virt(phy_addr) - page_address(page);
+
+		skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, page,
+				offset, seg->iov_len, seg->iov_len);
+	}
+
+	pkt->skb = skb;
+
+	return skb;
+}
+
+int dpdkio_poll(struct napi_struct *napi, int budget)
+{
+	struct dpdkio_dev *dpdk = container_of(napi, struct dpdkio_dev, napi);
+	struct net_device *dev = dpdk->dev;
+	struct lkl_dpdkio_pkt *pkts[LKL_DPDKIO_MAX_BURST];
+	struct lkl_dpdkio_pkt *pkt;
+	uint64_t nr_bytes, nr_pkts;
+	uint32_t head, tail, b;
+	int n, nr_rx;
+
+	head = tail = dpdk->rxhead;
+
+	/* obtain free slots */
+	b = 0;
+	for (n = 0; n < LKL_DPDKIO_SLOT_NUM; n++) {
+		pkt = &dpdk->rxslots[head];
+
+		if (dpdkio_can_reuse_rx_page(pkt)) {
+			pkts[n] = pkt;
+			b++;
+		}
+
+		head = (head + 1) & LKL_DPDKIO_SLOT_MASK;
+	}
+
+	/* receive packets into `ptks` */
+	nr_rx = lkl_ops->dpdkio_ops->rx(dpdk->portid, pkts, b);
+
+	/* build skb */
+	nr_bytes = 0;
+	nr_pkts = 0;
+	for (n = 0; n < nr_rx; n++) {
+		struct sk_buff *skb;
+
+		skb = dpdkio_rx_pkt_to_skb(dpdk, pkts[n]);
+		if (unlikely(!skb)) {
+			dev->stats.rx_dropped++;
+			continue;
+		}
+
+		napi_gro_receive(&dpdk->napi, skb);
+
+		nr_pkts++;
+		nr_bytes += pkts[n]->pkt_len;
+	}
+
+	/* advnce rxhead */
+	dpdk->rxhead = (dpdk->rxhead + nr_pkts) & LKL_DPDKIO_SLOT_MASK;
+
+	dev->stats.rx_packets += nr_pkts;
+	dev->stats.rx_bytes += nr_bytes;
+
+	/* exit polling mode */
+	napi_complete_done(napi, nr_pkts);
+	lkl_ops->dpdkio_ops->enable_rx_interrupt(dpdk->portid);
+
+	return nr_pkts;
+}
+
 static const struct net_device_ops dpdkio_netdev_ops = {
 	.ndo_open	= dpdkio_open,
 	.ndo_stop	= dpdkio_close,
@@ -245,6 +363,8 @@ static int dpdkio_init_netdev(struct net_device *dev)
 	}
 
 	netif_carrier_off(dev);
+
+	netif_napi_add(dev, &dpdk->napi, dpdkio_poll, 64);
 
 	return 0;
 }
@@ -298,7 +418,6 @@ static int dpdkio_init_dev(int port)
 	ret = dpdkio_init_netdev(dev);
 	if (ret < 0)
 		goto free_rx_mem_region;
-
 
 	pr_info("netdev %s, nb_rxd=%d nb_txd=%d, rx mempool 0x%lx, loaded\n",
 		netdev_name(dev), nb_txd, nb_rxd,

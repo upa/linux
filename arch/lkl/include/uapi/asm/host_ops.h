@@ -11,7 +11,7 @@ struct lkl_jmp_buf {
 };
 
 /* dpdkio */
-struct lkl_dpdkio_pkt;	/* defined in dpdkio.h */
+struct lkl_dpdkio_slot;	/* defined in dpdkio.h */
 
 struct lkl_dpdkio_ops {
 
@@ -38,7 +38,7 @@ struct lkl_dpdkio_ops {
 
 	/* RX path */
 
-	int (*rx)(int portid, struct lkl_dpdkio_pkt **pkts, int nb_pkts);
+	int (*rx)(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts);
 	/* receive upto `nb_pkts` packets from the ring to `pkts`
 	 * array. It retruns number of packets received. */
 
@@ -48,20 +48,20 @@ struct lkl_dpdkio_ops {
 
 	void (*mbuf_free)(void *mbuf);
 	/* this is actually rte_pktmbuf_free() to release
-	 * dpdkio_pkt->mbuf in the RX path. It is called to release
+	 * dpdkio_slot->mbuf in the RX path. It is called to release
 	 * mbuf when corresponding skb is consumed at the end of RX
 	 * path. */
 
 
 	/* TX path */
 
-	int (*tx)(int portid, struct lkl_dpdkio_pkt *pkts, int nb_pkts);
+	int (*tx)(int portid, struct lkl_dpdkio_slot *slots, int nb_pkts);
 	/* transmit upto `nb_pkts` packets in `pkts` array to a
 	 * underlaying ethernet device. It returns number of packets
 	 * transmitted. */
 
 	void (*free_skb)(void *skb);
-	/* this is actually kfree_skb to release dpdkio_pkt->skb in
+	/* this is actually kfree_skb to release dpdkio_slot->skb in
 	 * the TX path. It is called to release skb when the
 	 * corresponding mbuf is released at the end of TX path.
 	 *

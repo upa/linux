@@ -21,8 +21,8 @@ struct dpdkio_dev {
 
 	void	*rx_mem_region;	/* mempool region for rx */
 
-	struct lkl_dpdkio_pkt	txslots[LKL_DPDKIO_SLOT_NUM];
-	struct lkl_dpdkio_pkt	rxslots[LKL_DPDKIO_SLOT_NUM];
+	struct lkl_dpdkio_slot	txslots[LKL_DPDKIO_SLOT_NUM];
+	struct lkl_dpdkio_slot	rxslots[LKL_DPDKIO_SLOT_NUM];
 	uint32_t		txhead;
 	uint32_t		rxhead;
 
@@ -114,10 +114,10 @@ static int dpdkio_close(struct net_device *dev)
 	return 0;
 }
 
-static void dpdkio_debug_pkt(struct lkl_dpdkio_pkt *pkt, const char *prefix)
+static void dpdkio_debug_slot(struct lkl_dpdkio_slot *slot, const char *prefix)
 {
 	pr_info("%s: nsegs=%d pkt_len=%u skb=0x%lx\n",
-		prefix, pkt->nsegs, pkt->pkt_len, (uintptr_t)pkt->skb);
+		prefix, slot->nsegs, slot->pkt_len, (uintptr_t)slot->skb);
 }
 
 static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
@@ -125,7 +125,7 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 {
 	struct dpdkio_dev *dpdk = netdev_priv(dev);
 	struct skb_frag_struct *frag;
-	struct lkl_dpdkio_pkt *pkt;
+	struct lkl_dpdkio_slot *slot;
 	unsigned int data_len, size;
 	unsigned short f;
 	struct iovec *seg;
@@ -134,31 +134,31 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 	/* XXX: we assume that there is no race conditions on the
 	 * dpdkio TX path because of LKL */
 
-	pkt = &dpdk->txslots[dpdk->txhead];
-	if (READ_ONCE(pkt->skb)) {
+	slot = &dpdk->txslots[dpdk->txhead];
+	if (READ_ONCE(slot->skb)) {
 		/* slot is not released yet */
 		dev->stats.tx_dropped++;
 		return NETDEV_TX_BUSY;
 	}
 
-	/* let's fill the pkt slot */
-	pkt->pkt_len = skb->len;
-	pkt->nsegs = skb_shinfo(skb)->nr_frags + 1;
-	if (unlikely(pkt->nsegs > LKL_DPDKIO_MAX_SEGS)) {
+	/* let's fill the slot slot */
+	slot->pkt_len = skb->len;
+	slot->nsegs = skb_shinfo(skb)->nr_frags + 1;
+	if (unlikely(slot->nsegs > LKL_DPDKIO_MAX_SEGS)) {
 		net_err_ratelimited("too many frags %d (> %d)\n",
-				    pkt->nsegs, LKL_DPDKIO_MAX_SEGS);
+				    slot->nsegs, LKL_DPDKIO_MAX_SEGS);
 		goto out_drop;
 	}
 
 	/* the first segment, usually header */
-	seg = &pkt->segs[0];
+	seg = &slot->segs[0];
 	seg->iov_base = skb->data;	/* yeah, we are in LKL, va == pa */
 	seg->iov_len = skb_headlen(skb);
 
 	/* append frags */
 	data_len = skb->data_len;
 	for (f = 0; f < skb_shinfo(skb)->nr_frags; f++) {
-		seg = &pkt->segs[1 + f];
+		seg = &slot->segs[1 + f];
 		frag = &skb_shinfo(skb)->frags[f];
 
 		size = skb_frag_size(frag);
@@ -175,14 +175,14 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 		goto out_drop;
 	}
 
-	/* set skb to pkt to free skb when mbuf is released */
-	pkt->skb = skb;
+	/* set skb to slot to free skb when mbuf is released */
+	slot->skb = skb;
 
-	/* XXX: pass the pkt slot to dpdk backend. we need to batch
+	/* XXX: pass the slot slot to dpdk backend. we need to batch
 	 * packets. How to handle that? check enqueued packets in
 	 * qdisc? or check xmit_more?
 	 */
-	ret = lkl_ops->dpdkio_ops->tx(dpdk->portid, pkt, 1);
+	ret = lkl_ops->dpdkio_ops->tx(dpdk->portid, slot, 1);
 	if (unlikely(ret))
 		dev->stats.tx_carrier_errors++;
 
@@ -190,7 +190,7 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 	dpdk->txhead = (dpdk->txhead + 1) & LKL_DPDKIO_SLOT_MASK;
 	/* XXX: do we need memory barrier? */
 
-	dpdkio_debug_pkt(pkt, "tx");
+	dpdkio_debug_slot(slot, "tx");
 
 	return NETDEV_TX_OK;
 
@@ -200,31 +200,31 @@ out_drop:
 	return NETDEV_TX_OK;
 }
 
-static bool dpdkio_can_reuse_rx_page(struct lkl_dpdkio_pkt *pkt)
+static bool dpdkio_can_reuse_rx_page(struct lkl_dpdkio_slot *slot)
 {
 	struct page *page;
 	int n;
 
 	/* XXX: ??????? */
 
-	for (n = 0; n < pkt->nsegs; n++) {
-		page = virt_to_page(pkt->segs[n].iov_base);
+	for (n = 0; n < slot->nsegs; n++) {
+		page = virt_to_page(slot->segs[n].iov_base);
 		if (page_ref_count(page) > 1) {
 			return false;
 		}
 	}
 
 	/* ok, we can reuse this slot, check mbuf is attached */
-	if (READ_ONCE(pkt->mbuf)) {
-		lkl_ops->dpdkio_ops->mbuf_free(pkt->mbuf);
-		WRITE_ONCE(pkt->mbuf, NULL);
+	if (READ_ONCE(slot->mbuf)) {
+		lkl_ops->dpdkio_ops->mbuf_free(slot->mbuf);
+		WRITE_ONCE(slot->mbuf, NULL);
 	}
 
 	return true;
 }
 
-struct sk_buff *dpdkio_rx_pkt_to_skb(struct dpdkio_dev *dpdk,
-				     struct lkl_dpdkio_pkt *pkt)
+struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
+				     struct lkl_dpdkio_slot *slot)
 {
 	struct sk_buff *skb;
 	struct iovec *seg;
@@ -233,14 +233,14 @@ struct sk_buff *dpdkio_rx_pkt_to_skb(struct dpdkio_dev *dpdk,
 	int n;
 
 	/* build an skb to around the first segment */
-	seg = &pkt->segs[0];
+	seg = &slot->segs[0];
 	skb = build_skb(seg->iov_base, seg->iov_len);
 	if (!skb)
 		return NULL;
 	skb_put(skb, seg->iov_len);
 
-	for (n = 1; n < pkt->nsegs; n++) {
-		seg = &pkt->segs[n];
+	for (n = 1; n < slot->nsegs; n++) {
+		seg = &slot->segs[n];
 		phy_addr = (uintptr_t)seg->iov_base;
 
 		/* Note: in lkl, va = pa (asm-generic/io.h and
@@ -253,7 +253,7 @@ struct sk_buff *dpdkio_rx_pkt_to_skb(struct dpdkio_dev *dpdk,
 				offset, seg->iov_len, seg->iov_len);
 	}
 
-	pkt->skb = skb;
+	slot->skb = skb;
 
 	return skb;
 }
@@ -262,8 +262,8 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 {
 	struct dpdkio_dev *dpdk = container_of(napi, struct dpdkio_dev, napi);
 	struct net_device *dev = dpdk->dev;
-	struct lkl_dpdkio_pkt *pkts[LKL_DPDKIO_MAX_BURST];
-	struct lkl_dpdkio_pkt *pkt;
+	struct lkl_dpdkio_slot *slots[LKL_DPDKIO_MAX_BURST];
+	struct lkl_dpdkio_slot *slot;
 	uint64_t nr_bytes, nr_pkts;
 	uint32_t head, tail, b;
 	int n, nr_rx;
@@ -273,10 +273,10 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 	/* obtain free slots */
 	b = 0;
 	for (n = 0; n < LKL_DPDKIO_SLOT_NUM; n++) {
-		pkt = &dpdk->rxslots[head];
+		slot = &dpdk->rxslots[head];
 
-		if (dpdkio_can_reuse_rx_page(pkt)) {
-			pkts[n] = pkt;
+		if (dpdkio_can_reuse_rx_page(slot)) {
+			slots[n] = slot;
 			b++;
 		}
 
@@ -284,7 +284,7 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 	}
 
 	/* receive packets into `ptks` */
-	nr_rx = lkl_ops->dpdkio_ops->rx(dpdk->portid, pkts, b);
+	nr_rx = lkl_ops->dpdkio_ops->rx(dpdk->portid, slots, b);
 
 	/* build skb */
 	nr_bytes = 0;
@@ -292,7 +292,7 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 	for (n = 0; n < nr_rx; n++) {
 		struct sk_buff *skb;
 
-		skb = dpdkio_rx_pkt_to_skb(dpdk, pkts[n]);
+		skb = dpdkio_rx_slot_to_skb(dpdk, slots[n]);
 		if (unlikely(!skb)) {
 			dev->stats.rx_dropped++;
 			continue;
@@ -301,7 +301,7 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 		napi_gro_receive(&dpdk->napi, skb);
 
 		nr_pkts++;
-		nr_bytes += pkts[n]->pkt_len;
+		nr_bytes += slots[n]->pkt_len;
 	}
 
 	/* advnce rxhead */

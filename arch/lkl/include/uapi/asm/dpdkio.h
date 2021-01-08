@@ -4,7 +4,7 @@
 #define LKL_DPDKIO_MAX_BURST	128
 #define LKL_DPDKIO_MAX_SEGS	32
 
-struct lkl_dpdkio_pkt {
+struct lkl_dpdkio_slot {
 	struct iovec	segs[LKL_DPDKIO_MAX_SEGS]; /* sg list for a packet */
 	int		nsegs;			/* number of segs */
 	uint32_t	pkt_len;		/* total packet length */

@@ -328,7 +328,7 @@ static void dpdkio_disable_rx_interrupt(int portid)
 {
 }
 
-static int dpdkio_rx(int portid, struct lkl_dpdkio_pkt **pkts, int nb_pkts)
+static int dpdkio_rx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 {
 	return 0;
 }
@@ -341,19 +341,19 @@ static void dpdkio_mbuf_free(void *mbuf)
 
 static void dpdkio_extmem_free_cb(void *addr, void *opaque)
 {
-	struct lkl_dpdkio_pkt *pkt = opaque;
+	struct lkl_dpdkio_slot *slot = opaque;
 
-	pr_info("free skb 0x%lx from dpdk\n", (uintptr_t)pkt->skb);
+	pr_info("free skb 0x%lx from dpdk\n", (uintptr_t)slot->skb);
 
-	lkl_host_ops.dpdkio_ops->free_skb(pkt->skb);
-	pkt->skb = NULL;
+	lkl_host_ops.dpdkio_ops->free_skb(slot->skb);
+	slot->skb = NULL;
 	__sync_synchronize();
 }
 
 static struct rte_mbuf_ext_shared_info *
-dpdkio_get_mbuf_shared_info(struct lkl_dpdkio_pkt *pkt)
+dpdkio_get_mbuf_shared_info(struct lkl_dpdkio_slot *slot)
 {
-	return (struct rte_mbuf_ext_shared_info *)pkt->opaque;
+	return (struct rte_mbuf_ext_shared_info *)slot->opaque;
 }
 
 static inline rte_iova_t dpdkio_seg_iova(struct dpdkio_port *port,
@@ -367,19 +367,19 @@ static inline rte_iova_t dpdkio_seg_iova(struct dpdkio_port *port,
 	return (rte_iova_t)iova;
 }
 
-static int dpdkio_tx(int portid, struct lkl_dpdkio_pkt *pkts, int nb_pkts)
+static int dpdkio_tx(int portid, struct lkl_dpdkio_slot *slots, int nb_pkts)
 {
 	struct dpdkio_port *port = dpdkio_port_get(portid);
 	struct rte_mbuf *mbufs[LKL_DPDKIO_MAX_BURST], *prev;
 	struct rte_mbuf *mbufs_tx[LKL_DPDKIO_MAX_BURST];
 	struct rte_mbuf_ext_shared_info *shinfo;
-	struct lkl_dpdkio_pkt *pkt;
+	struct lkl_dpdkio_slot *slot;
 	int ret, n, i, nsegs, mbufcnt, mbufs_tx_cnt;
 
 	nsegs = 0;
 	for (n = 0; n < nb_pkts; n++) {
-		pkt = &pkts[n];
-		nsegs += pkt->nsegs;
+		slot = &slots[n];
+		nsegs += slot->nsegs;
 	}
 
 	mbufcnt = 0;
@@ -391,16 +391,16 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_pkt *pkts, int nb_pkts)
 	mbufs_tx_cnt = 0;
 	for (n = 0; n < nb_pkts; n++) {
 
-		pkt = &pkts[n];
-		shinfo = dpdkio_get_mbuf_shared_info(pkt);
+		slot = &slots[n];
+		shinfo = dpdkio_get_mbuf_shared_info(slot);
 		shinfo->free_cb = dpdkio_extmem_free_cb;
-		shinfo->fcb_opaque = pkt;
+		shinfo->fcb_opaque = slot;
 		rte_mbuf_ext_refcnt_set(shinfo, 1);
 
 		prev = NULL;
 
-		for (i = 0; i < pkt->nsegs; i++) {
-			struct lkl_iovec *seg = &pkt->segs[i];
+		for (i = 0; i < slot->nsegs; i++) {
+			struct lkl_iovec *seg = &slot->segs[i];
 			struct rte_mbuf *mbuf = mbufs[mbufcnt++];
 
 			rte_pktmbuf_attach_extbuf(mbuf,

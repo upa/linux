@@ -1,9 +1,6 @@
-#include <stdlib.h>
 #include <lkl_host.h>
 #include <lkl/asm/dpdkio.h>
-
 #include "dpdkio.h"
-
 
 #ifndef LKL_HOST_CONFIG_DPDKIO
 
@@ -14,11 +11,14 @@ int lkl_dpdkio_init(int argc, char **argv)
 
 #else
 
-
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/eventfd.h>
 
 #include <rte_eal.h>
 #include <rte_malloc.h>
 #include <rte_ethdev.h>
+#include <rte_cycles.h>
 
 
 #define pr_info(fmt, ...) fprintf(stdout, "%s(): " fmt,	 \
@@ -66,6 +66,12 @@ struct dpdkio_port {
 	char		rx_heap_name[DPDKIO_MEM_NAME_MAX];
 	char		rx_mempool_name[DPDKIO_MEM_NAME_MAX];
 	struct rte_mempool	*rx_mempool;
+
+	int		irq;		/* rx interrupt number */
+	int		irq_ack_fd;	/* eventfd to receive irq ack */
+	lkl_thread_t	poll_tid;	/* rx polling thread id */
+	int		poll_hup;	/* 1 indicates stopping rx polling */
+	int		poll_enabled;
 
 	/* tx */
 	char		tx_mempool_name[DPDKIO_MEM_NAME_MAX];
@@ -139,7 +145,8 @@ static int dpdkio_init_port(int portid)
 	return 0;
 }
 
-static int dpdkio_init_rxring(int portid, unsigned long addr, int size)
+static int dpdkio_init_rxring(int portid, unsigned long addr, int size,
+			      int *irq, int *irq_ack_fd)
 {
 	struct dpdkio_port *port = dpdkio_port_get(portid);
 	rte_iova_t iova[LKL_DPDKIO_MEMPOOL_PAGE_NUM];
@@ -192,9 +199,17 @@ static int dpdkio_init_rxring(int portid, unsigned long addr, int size)
 		return -ENOENT;
 	}
 
+	/* Note, create LKL_DPDKIO_SLOT_NUM + 64 mbufs on the rx
+	 * mempool.  dpdkio driver releases an RXed buffer with mbuf
+	 * when recycle the buffer. So, if the number of slots and the
+	 * number of mbufs on the rx pool are identical, dpdk RX is
+	 * stuck because there are no mbufs on the pool. So, we
+	 * allocate LKL_DPDKIO_SLOT_NUM + 64 mbufs.
+	 */
 	port->rx_mempool = rte_pktmbuf_pool_create(port->rx_mempool_name,
-						   LKL_DPDKIO_SLOT_NUM, 256, 0,
-						   RTE_MBUF_DEFAULT_BUF_SIZE,
+						   LKL_DPDKIO_SLOT_NUM + 64,
+						   256, 0,
+						   RTE_MBUF_DEFAULT_DATAROOM,
 						   sock_id);
 	if (!port->rx_mempool) {
 		pr_err("failed to create rx mempool %s "
@@ -203,6 +218,21 @@ static int dpdkio_init_rxring(int portid, unsigned long addr, int size)
 		       sock_id, strerror(rte_errno));
 		return -1 * rte_errno;
 	}
+
+	/* initialize irq */
+	port->irq = lkl_get_free_irq("dpdkio");
+	if (port->irq < 0) {
+		pr_err("failed to get free irq\n");
+		return port->irq;
+	}
+	*irq = port->irq;
+
+	port->irq_ack_fd = eventfd(0, EFD_CLOEXEC);
+	if (port->irq_ack_fd < 0) {
+		pr_err("failed to create eventfd: %s\n", strerror(errno));
+		return -1 * errno;
+	}
+	*irq_ack_fd = port->irq_ack_fd;
 
 	return 0;
 }
@@ -263,7 +293,6 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 		return ret;
 	}
 
-
 	/* setup queue */
 	/* XXX: RX offload setting here */
 	ret = rte_eth_rx_queue_setup(portid, 0, nb_rxd, SOCKET_ID_ANY,
@@ -288,6 +317,96 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 	return 0;
 }
 
+static void dpdkio_ack_rx_interrupt(int irq_ack_fd)
+{
+	unsigned long v = 1;
+	int ret;
+
+	ret = write(irq_ack_fd, &v, sizeof(v));
+	if (unlikely(ret < 0))
+		pr_err("write: %s\n", strerror(errno));
+}
+
+static void dpdkio_deliver_irq(struct dpdkio_port *port)
+{
+	uint64_t v;
+	int ret;
+
+	lkl_trigger_irq(port->irq);
+
+	/* wait until irq is acked. write(irq_ack_fd) is called via
+	 * host_ops->dpdkio_ops->ack_rx_interrupt, which means
+	 * dpdkio_ack_rx_interrupt() shown above.
+	 */
+	ret = read(port->irq_ack_fd, &v, sizeof(v));
+	if(unlikely(ret < 0))
+		pr_err("read: %s\n", strerror(errno));
+}
+
+static void dpdkio_rx_poll_thread(void *arg)
+{
+	struct dpdkio_port *port = arg;
+	int nb_rx, wait = 0;
+
+	/* XXX: there are too many rooms for optimization.
+	 *
+	 * wait is the number of poll results on which queued packet
+	 * is 0.
+	 */
+
+	do {
+		if (port->poll_hup)
+			break;
+
+		nb_rx = rte_eth_rx_queue_count(port->portid, 0);
+
+		if (0 < nb_rx)
+			wait = 0;
+		else if (nb_rx == 0)
+			wait = ((wait + 1) & 0xFF) | 0x01;
+		else {
+			pr_err("rte_eth_rx_queue_count: %s\n",
+			       strerror(-1 * nb_rx));
+			return;
+		}
+
+		if (wait == 0) {
+			/* there are pending packet(s) in the rx queue */
+			if (port->poll_enabled) {
+				pr_info("deliver irq, nb_rx is %d\n", nb_rx);
+				dpdkio_deliver_irq(port);
+			} else
+				rte_delay_us_sleep(1);
+		} else
+			rte_delay_us_sleep(wait);
+
+	} while (1);
+}
+
+static int dpdkio_start_rx_poll_thread(int portid)
+{
+	struct dpdkio_port *port = dpdkio_port_get(portid);
+
+	port->poll_hup = 0;
+	port->poll_tid = lkl_host_ops.thread_create(dpdkio_rx_poll_thread,
+						    port);
+	if (port->poll_tid == 0) {
+		pr_err("failed to spawn rx poll thread: %s\n",
+		       strerror(errno));
+		return -1 * errno;
+	}
+
+	return 0;
+}
+
+static void dpdkio_stop_rx_poll_thread(int portid)
+{
+	struct dpdkio_port *port = dpdkio_port_get(portid);
+
+	port->poll_hup = 1;
+	__sync_synchronize();
+}
+
 static int dpdkio_start(int portid)
 {
 	int ret;
@@ -304,12 +423,18 @@ static int dpdkio_start(int portid)
 		return ret;
 	}
 
+	ret = dpdkio_start_rx_poll_thread(portid);
+	if (ret < 0)
+		return ret;
+
 	return 0;
 }
 
 static int dpdkio_stop(int portid)
 {
 	int ret;
+
+	dpdkio_stop_rx_poll_thread(portid);
 
 	ret = rte_eth_dev_stop(portid);
 	if (ret < 0) {
@@ -322,15 +447,61 @@ static int dpdkio_stop(int portid)
 
 static void dpdkio_enable_rx_interrupt(int portid)
 {
+	struct dpdkio_port *port = dpdkio_port_get(portid);
+	port->poll_enabled = 1;
+	__sync_synchronize();	/* XXX: heavy? */
 }
 
 static void dpdkio_disable_rx_interrupt(int portid)
 {
+	struct dpdkio_port *port = dpdkio_port_get(portid);
+	port->poll_enabled = 0;
+	__sync_synchronize();	/* XXX: heavy? */
+}
+
+static int dpdkio_rx_mbuf_to_slot(struct rte_mbuf *_mbuf,
+				  struct lkl_dpdkio_slot *slot)
+{
+	struct rte_mbuf *mbuf;
+	int n;
+
+	if (_mbuf->nb_segs > LKL_DPDKIO_MAX_SEGS) {
+		pr_err("too many segments in a mbuf %d (> max %d)\n",
+		       _mbuf->nb_segs, LKL_DPDKIO_MAX_SEGS);
+		rte_pktmbuf_free(_mbuf);
+		return -1;
+	}
+
+	mbuf = _mbuf;
+
+	for (n = 0; n < _mbuf->nb_segs; n++) {
+		slot->segs[n].iov_base = mbuf->buf_addr + mbuf->data_off;
+		slot->segs[n].iov_len = mbuf->data_len;
+		mbuf = mbuf->next;
+	}
+
+	slot->nsegs = _mbuf->nb_segs;
+	slot->pkt_len = rte_pktmbuf_pkt_len(_mbuf);
+	slot->mbuf = _mbuf;
+
+	return 0;
 }
 
 static int dpdkio_rx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 {
-	return 0;
+	struct rte_mbuf *mbufs[LKL_DPDKIO_MAX_BURST];
+	int nb_rx, n, i, ret;
+
+	nb_rx = rte_eth_rx_burst(portid, 0, mbufs, nb_pkts);
+
+	for (i = 0, n = 0; n < nb_rx; n++) {
+		ret = dpdkio_rx_mbuf_to_slot(mbufs[n], slots[i]);
+		if (unlikely(ret < 0))
+			continue; /* advance only mbuf index 'n', not 'i' */
+		i++;
+	}
+
+	return i;
 }
 
 static void dpdkio_mbuf_free(void *mbuf)
@@ -470,6 +641,7 @@ struct lkl_dpdkio_ops dpdkio_ops = {
 	.start			= dpdkio_start,
 	.stop			= dpdkio_stop,
 	.rx			= dpdkio_rx,
+	.ack_rx_interrupt	= dpdkio_ack_rx_interrupt,
 	.enable_rx_interrupt	= dpdkio_enable_rx_interrupt,
 	.disable_rx_interrupt	= dpdkio_disable_rx_interrupt,
 	.mbuf_free		= dpdkio_mbuf_free,

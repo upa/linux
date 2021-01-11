@@ -34,6 +34,8 @@ struct dpdkio_dev {
 	 * is not NULL), it means slot is full, wait.
 	 */
 
+	int			irq;		/* rx interrupt number */
+	int			irq_ack_fd;	/* eventfd for ack irq */
 	struct napi_struct	napi;
 };
 
@@ -97,6 +99,9 @@ static int dpdkio_open(struct net_device *dev)
 
 	dpdkio_check_link_status(dpdk);
 
+	lkl_ops->dpdkio_ops->enable_rx_interrupt(dpdk->portid);
+	napi_enable(&dpdk->napi);
+
 	return 0;
 }
 
@@ -108,6 +113,8 @@ static int dpdkio_close(struct net_device *dev)
 	ret = lkl_ops->dpdkio_ops->stop(dpdk->portid);
 	if (ret < 0)
 		return ret;
+
+	napi_disable(&dpdk->napi);
 
 	netif_carrier_off(dev);
 
@@ -160,7 +167,6 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 	for (f = 0; f < skb_shinfo(skb)->nr_frags; f++) {
 		seg = &slot->segs[1 + f];
 		frag = &skb_shinfo(skb)->frags[f];
-
 		size = skb_frag_size(frag);
 
 		seg->iov_base = skb_frag_address(frag);
@@ -200,44 +206,59 @@ out_drop:
 	return NETDEV_TX_OK;
 }
 
-static bool dpdkio_can_reuse_rx_page(struct lkl_dpdkio_slot *slot)
+static bool dpdkio_recycle_rx_page(struct lkl_dpdkio_slot *slot)
 {
 	struct page *page;
-	int n;
+	void *mbuf;
+	int n, ref;
 
 	/* XXX: ??????? */
 
 	for (n = 0; n < slot->nsegs; n++) {
+
 		page = virt_to_page(slot->segs[n].iov_base);
-		if (page_ref_count(page) > 1) {
+		ref = page_ref_count(page);
+
+		if (ref == 0)
+			get_page(page); /* own free page */
+
+		if (ref > 1) {
+			pr_info("not released\n");
 			return false;
 		}
 	}
 
-	/* ok, we can reuse this slot, check mbuf is attached */
-	if (READ_ONCE(slot->mbuf)) {
-		lkl_ops->dpdkio_ops->mbuf_free(slot->mbuf);
+	/* ok, we can reuse this slot. if mbuf is attached, release it  */
+	mbuf = READ_ONCE(slot->mbuf);
+	if (mbuf) {
+		lkl_ops->dpdkio_ops->mbuf_free(mbuf);
 		WRITE_ONCE(slot->mbuf, NULL);
+		pr_info("!!!!!!!!!! release mbuf and reuse it!!\n");
 	}
 
 	return true;
 }
 
 struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
-				     struct lkl_dpdkio_slot *slot)
+				      struct lkl_dpdkio_slot *slot)
 {
 	struct sk_buff *skb;
 	struct iovec *seg;
 	struct page *page;
 	uint64_t offset, phy_addr;
+	uint32_t truesize;
 	int n;
 
-	/* build an skb to around the first segment */
-	seg = &slot->segs[0];
-	skb = build_skb(seg->iov_base, seg->iov_len);
+	/* build an skb to around the first segment
+	 * XXX: really there is tail room for shared_info?
+	 */
+	truesize = (SKB_DATA_ALIGN(slot->segs[0].iov_len) +
+		    SKB_DATA_ALIGN(sizeof(struct skb_shared_info)));
+
+	skb = build_skb(slot->segs[0].iov_base, truesize);
 	if (!skb)
 		return NULL;
-	skb_put(skb, seg->iov_len);
+	__skb_put(skb, slot->segs[0].iov_len);
 
 	for (n = 1; n < slot->nsegs; n++) {
 		seg = &slot->segs[n];
@@ -253,6 +274,9 @@ struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
 				offset, seg->iov_len, seg->iov_len);
 	}
 
+	pr_info("skb->len is %u skb->data_len is %u\n", skb->len, skb->data_len);
+	skb->protocol = eth_type_trans(skb, dpdk->dev);
+
 	slot->skb = skb;
 
 	return skb;
@@ -261,30 +285,32 @@ struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
 int dpdkio_poll(struct napi_struct *napi, int budget)
 {
 	struct dpdkio_dev *dpdk = container_of(napi, struct dpdkio_dev, napi);
+	struct lkl_dpdkio_slot *slots[LKL_DPDKIO_MAX_BURST], *slot;
 	struct net_device *dev = dpdk->dev;
-	struct lkl_dpdkio_slot *slots[LKL_DPDKIO_MAX_BURST];
-	struct lkl_dpdkio_slot *slot;
 	uint64_t nr_bytes, nr_pkts;
-	uint32_t head, tail, b;
-	int n, nr_rx;
+	uint32_t head, b;
+	int n, i, nr_rx;
 
-	head = tail = dpdk->rxhead;
+	head = dpdk->rxhead;
+	b = min(budget, LKL_DPDKIO_MAX_BURST);
 
-	/* obtain free slots */
-	b = 0;
-	for (n = 0; n < LKL_DPDKIO_SLOT_NUM; n++) {
+	/* obtain free slots while walking around the rxslot ring */
+	for (i = 0, n = 0; n < LKL_DPDKIO_SLOT_NUM; n++) {
 		slot = &dpdk->rxslots[head];
-
-		if (dpdkio_can_reuse_rx_page(slot)) {
-			slots[n] = slot;
-			b++;
+		if (dpdkio_recycle_rx_page(slot)) {
+			slots[i++] = slot;
+			if (i > b)
+				break;
 		}
 
 		head = (head + 1) & LKL_DPDKIO_SLOT_MASK;
 	}
 
-	/* receive packets into `ptks` */
-	nr_rx = lkl_ops->dpdkio_ops->rx(dpdk->portid, slots, b);
+	/* advnce rxhead */
+	dpdk->rxhead = head & LKL_DPDKIO_SLOT_MASK;
+
+	/* receive packets into `slots` */
+	nr_rx = lkl_ops->dpdkio_ops->rx(dpdk->portid, slots, i);
 
 	/* build skb */
 	nr_bytes = 0;
@@ -298,14 +324,13 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 			continue;
 		}
 
+		pr_info("recv %u-byte pkt\n", skb->len);
 		napi_gro_receive(&dpdk->napi, skb);
 
 		nr_pkts++;
 		nr_bytes += slots[n]->pkt_len;
 	}
 
-	/* advnce rxhead */
-	dpdk->rxhead = (dpdk->rxhead + nr_pkts) & LKL_DPDKIO_SLOT_MASK;
 
 	dev->stats.rx_packets += nr_pkts;
 	dev->stats.rx_bytes += nr_bytes;
@@ -315,6 +340,20 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 	lkl_ops->dpdkio_ops->enable_rx_interrupt(dpdk->portid);
 
 	return nr_pkts;
+}
+
+static irqreturn_t dpdkio_handle_irq(int irq, void *data)
+{
+	struct dpdkio_dev *dpdk = data;
+
+	/* disalbe rx irq and ack this itnerrupt */
+	lkl_ops->dpdkio_ops->disable_rx_interrupt(dpdk->portid);
+	lkl_ops->dpdkio_ops->ack_rx_interrupt(dpdk->irq_ack_fd);
+
+	/* go to napi context */
+	napi_schedule_irqoff(&dpdk->napi);
+
+	return IRQ_HANDLED;
 }
 
 static const struct net_device_ops dpdkio_netdev_ops = {
@@ -405,7 +444,9 @@ static int dpdkio_init_dev(int port)
 
 	ret = lkl_ops->dpdkio_ops->init_rxring(dpdk->portid,
 					       (uintptr_t)dpdk->rx_mem_region,
-					       LKL_DPDKIO_MEMPOOL_SIZE);
+					       LKL_DPDKIO_MEMPOOL_SIZE,
+					       &dpdk->irq,
+					       &dpdk->irq_ack_fd);
 	if (ret < 0)
 		goto free_rx_mem_region;
 
@@ -419,9 +460,13 @@ static int dpdkio_init_dev(int port)
 	if (ret < 0)
 		goto free_rx_mem_region;
 
-	pr_info("netdev %s, nb_rxd=%d nb_txd=%d, rx mempool 0x%lx, loaded\n",
+	/* init rx irq */
+	ret = request_irq(dpdk->irq, dpdkio_handle_irq, 0, netdev_name(dev),
+			  dpdk);
+
+	pr_info("netdev %s nb_rxd=%d nb_txd=%d rxpool 0x%lx irq=%d loaded\n",
 		netdev_name(dev), nb_txd, nb_rxd,
-		(uintptr_t)dpdk->rx_mem_region);
+		(uintptr_t)dpdk->rx_mem_region, dpdk->irq);
 
 	return ret;
 

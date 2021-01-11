@@ -23,11 +23,13 @@ struct lkl_dpdkio_ops {
 
 	int (*init_port)(int portid);	/* initialize a dpdkio port */
 
-	int (*init_rxring)(int portid, unsigned long addr, int size);
+	int (*init_rxring)(int portid, unsigned long addr, int size,
+			   int *irq, int *irq_ack_fd);
 	/* pass a buffer region inside the bootmem and its
 	 * size. dpdkio_init_rxing creates a heap on the region,
 	 * creates mempool on the heap, and set it as rx mempool for a
-	 * underlaying ethernet device. */
+	 * underlaying ethernet device. irq number associating the rx
+	 * is returned through `irq`. */
 
 	int (*setup)(int portid, int *nb_rx_desc, int *nb_tx_desc);
 	/* setup a dpdkio device */
@@ -42,6 +44,7 @@ struct lkl_dpdkio_ops {
 	/* receive upto `nb_pkts` packets from the ring to `pkts`
 	 * array. It retruns number of packets received. */
 
+	void (*ack_rx_interrupt)(int irq_ack_fd);
 	void (*enable_rx_interrupt)(int portid);
 	void (*disable_rx_interrupt)(int portid);
 	/* polling is mapped to napi */

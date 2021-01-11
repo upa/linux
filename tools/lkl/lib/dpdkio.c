@@ -14,6 +14,7 @@ int lkl_dpdkio_init(int argc, char **argv)
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/eventfd.h>
+#include <linux/if_ether.h>
 
 #include <rte_eal.h>
 #include <rte_malloc.h>
@@ -278,8 +279,9 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 		return ret;
 	}
 
-	if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
-		port_conf.txmode.offloads |= DEV_TX_OFFLOAD_MBUF_FAST_FREE;
+	port_conf.txmode.offloads = dev_info.tx_offload_capa;
+
+
 
 	pr_info("port %d tx offload capa is 0x%lx\n",
 		portid, dev_info.tx_offload_capa);
@@ -510,21 +512,35 @@ static void dpdkio_mbuf_free(void *mbuf)
 	return;
 }
 
-static void dpdkio_extmem_free_cb(void *addr, void *opaque)
-{
-	struct lkl_dpdkio_slot *slot = opaque;
-
-	pr_info("free skb 0x%lx from dpdk\n", (uintptr_t)slot->skb);
-
-	lkl_host_ops.dpdkio_ops->free_skb(slot->skb);
-	slot->skb = NULL;
-	__sync_synchronize();
-}
-
 static struct rte_mbuf_ext_shared_info *
 dpdkio_get_mbuf_shared_info(struct lkl_dpdkio_slot *slot)
 {
 	return (struct rte_mbuf_ext_shared_info *)slot->opaque;
+}
+
+static void dpdkio_extmem_free_cb(void *addr, void *opaque)
+{
+	struct lkl_dpdkio_slot *slot = opaque;
+	struct rte_mbuf_ext_shared_info *shinfo;
+	uint16_t refcnt;
+
+	/* Note, all segments of a mbuf has an identical pointer to
+	 * shinfo. refcnt of shinfo indicates how many mbufs with
+	 * extmem have reference to the slot and shinfo.  free_cb
+	 * decrements the refcnt, and if it is 0, there is no mbuf
+	 * with extmem referencing the slot and shinfo. Then release
+	 * skb.
+	 */
+
+	shinfo = dpdkio_get_mbuf_shared_info(slot);
+	refcnt = rte_mbuf_ext_refcnt_update(shinfo, -1);
+
+	if (refcnt == 0) {
+		pr_info("free skb 0x%lx from dpdk\n", (uintptr_t)slot->skb);
+		lkl_host_ops.dpdkio_ops->free_skb(slot->skb);
+		slot->skb = NULL;
+		__sync_synchronize();
+	}
 }
 
 static inline rte_iova_t dpdkio_seg_iova(struct dpdkio_port *port,
@@ -538,10 +554,31 @@ static inline rte_iova_t dpdkio_seg_iova(struct dpdkio_port *port,
 	return (rte_iova_t)iova;
 }
 
+static void dpdkio_fill_mbuf_tx_offload(struct lkl_dpdkio_slot *slot,
+					struct rte_mbuf *mbuf)
+{
+	if (slot->ip_protocol == IPPROTO_TCP) {
+		mbuf->ol_flags |= PKT_TX_TCP_CKSUM;
+
+		if (slot->nsegs > 1) {
+			mbuf->ol_flags |= PKT_TX_TCP_SEG;
+			mbuf->l2_len = slot->l2_len;
+			mbuf->l3_len = slot->l3_len;
+			mbuf->l4_len = slot->l4_len;
+			mbuf->tso_segsz = slot->tso_segsz;
+		}
+
+		if (slot->eth_protocol == htons(ETH_P_IP))
+			mbuf->ol_flags |= PKT_TX_IPV4;
+		else if (slot->eth_protocol == htons(ETH_P_IPV6))
+			mbuf->ol_flags |= PKT_TX_IPV6;
+	}
+}
+
 static int dpdkio_tx(int portid, struct lkl_dpdkio_slot *slots, int nb_pkts)
 {
 	struct dpdkio_port *port = dpdkio_port_get(portid);
-	struct rte_mbuf *mbufs[LKL_DPDKIO_MAX_BURST], *prev;
+	struct rte_mbuf *mbufs[LKL_DPDKIO_MAX_BURST], *head;
 	struct rte_mbuf *mbufs_tx[LKL_DPDKIO_MAX_BURST];
 	struct rte_mbuf_ext_shared_info *shinfo;
 	struct lkl_dpdkio_slot *slot;
@@ -571,29 +608,37 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot *slots, int nb_pkts)
 		shinfo = dpdkio_get_mbuf_shared_info(slot);
 		shinfo->free_cb = dpdkio_extmem_free_cb;
 		shinfo->fcb_opaque = slot;
-		rte_mbuf_ext_refcnt_set(shinfo, 1);
-
-		prev = NULL;
+		rte_mbuf_ext_refcnt_set(shinfo, 0);
+		head = NULL;
 
 		for (i = 0; i < slot->nsegs; i++) {
 			struct lkl_iovec *seg = &slot->segs[i];
 			struct rte_mbuf *mbuf = mbufs[mbufcnt++];
 
+			rte_mbuf_ext_refcnt_update(shinfo, 1);
+
 			rte_pktmbuf_attach_extbuf(mbuf,
 						  seg->iov_base,
 						  dpdkio_seg_iova(port, seg),
-						  seg->iov_len,
-						  (i == 0) ? shinfo : NULL);
+						  seg->iov_len, shinfo);
 			mbuf->pkt_len = seg->iov_len;
 			mbuf->data_len = seg->iov_len;
 
-			if (prev == NULL) {
+			if (head == NULL) {
 				/* the first mbuf of this packet */
-				prev = mbuf;
+				head = mbuf;
 				mbufs_tx[mbufs_tx_cnt++] = mbuf;
-			} else
-				rte_pktmbuf_attach(mbuf, prev);
+			} else {
+				ret = rte_pktmbuf_chain(head, mbuf);
+				if (unlikely(ret < 0)) {
+					pr_err("too many mbuf chain: %s\n",
+					       strerror(errno));
+					assert(0);
+				}
+			}
 		}
+
+		dpdkio_fill_mbuf_tx_offload(slot, mbufs_tx[mbufs_tx_cnt - 1]);
 
 		/* debug */
 		rte_pktmbuf_dump(stdout, mbufs_tx[mbufs_tx_cnt - 1], 16);

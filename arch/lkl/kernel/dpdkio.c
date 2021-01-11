@@ -6,6 +6,9 @@
 #include <linux/errno.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
+#include <linux/ip.h>
+#include <linux/tcp.h>
+#include <linux/udp.h>
 #include <asm/host_ops.h>
 #include <uapi/asm/dpdkio.h>
 
@@ -127,6 +130,53 @@ static void dpdkio_debug_slot(struct lkl_dpdkio_slot *slot, const char *prefix)
 		prefix, slot->nsegs, slot->pkt_len, (uintptr_t)slot->skb);
 }
 
+static void dpdkio_fill_slot_tx_offload(struct sk_buff *skb,
+					struct lkl_dpdkio_slot *slot)
+{
+	unsigned char *l2, *l3, *l4, *l5;
+	struct tcphdr *tcp;
+
+	pr_info("hoge\n");
+
+	if (skb->ip_summed != CHECKSUM_PARTIAL)
+		return;
+
+	pr_info("hoge\n");
+
+	slot->tso_segsz = 0;
+	slot->eth_protocol = skb->protocol;
+
+	l2 = skb_mac_header(skb);
+	l3 = skb_network_header(skb);
+	l4 = skb_transport_header(skb);
+
+	switch(skb->csum_offset) {
+
+	case offsetof(struct tcphdr, check):
+		slot->ip_protocol = IPPROTO_TCP;
+		tcp = (struct tcphdr *)l4;
+		l5 = l4 + (tcp->doff << 2);
+		slot->tso_segsz = skb->len;
+		pr_info("tcp\n");
+		break;
+
+	case offsetof(struct udphdr, check):
+		slot->ip_protocol = IPPROTO_UDP;
+		l5 = l4 + sizeof(struct udphdr);
+		pr_info("udp\n");
+		break;
+
+	default:
+		pr_info("fall through\n");
+		slot->ip_protocol = 0;
+		l5 = NULL;
+	}
+
+	slot->l2_len = l3 - l2;
+	slot->l3_len = l4 - l3;
+	slot->l4_len = (l5) ? l5 - l4 : 0;
+}
+
 static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 				     struct net_device *dev)
 {
@@ -180,6 +230,8 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 		dev->stats.tx_dropped++;
 		goto out_drop;
 	}
+
+	dpdkio_fill_slot_tx_offload(skb, slot);
 
 	/* set skb to slot to free skb when mbuf is released */
 	slot->skb = skb;

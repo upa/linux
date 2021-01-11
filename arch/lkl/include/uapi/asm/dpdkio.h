@@ -12,7 +12,19 @@ struct lkl_dpdkio_slot {
 	void 	*mbuf;	/* pointer to struct mbuf of this packet */
 	void	*skb;	/* pointer to struct sk_buff of this packet */
 
-	char opaque[32];	/* used as rte_mbuf_ext_sahred_info */
+	/* header sizes from rte_mbuf_core.h for TX offload */
+	struct {
+		uint64_t	l2_len:7;
+		uint64_t	l3_len:9;
+		uint64_t	l4_len:8;
+		uint64_t	tso_segsz:16;
+		uint64_t	outer_l3_len:9;
+		uint64_t	outer_l2_len:7;
+	};
+	uint16_t	eth_protocol;	/* ETH_P_* */
+	uint8_t		ip_protocol;	/* IPPROTO_* */
+
+	char opaque[32]; /* used as rte_mbuf_ext_shared_info structures */
 };
 
 #define LKL_DPDKIO_PAGE_SIZE		4096

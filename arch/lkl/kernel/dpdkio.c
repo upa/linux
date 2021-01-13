@@ -268,32 +268,30 @@ out_drop:
 	return NETDEV_TX_OK;
 }
 
-static bool dpdkio_recycle_rx_page(struct lkl_dpdkio_slot *slot)
+static bool dpdkio_recycle_rx_slot(struct lkl_dpdkio_slot *slot)
 {
-	struct page *page;
-	void *mbuf;
-	int n;
+	struct sk_buff *skb;
 
-	/* XXX: ??????? */
+	if (slot->skb == NULL)
+		return true;
 
-	for (n = 0; n < slot->nsegs; n++) {
+	skb = slot->skb;
 
-		page = virt_to_page(slot->segs[n].iov_base);
-		if (page_ref_count(page) > 1) {
-			pr_info("not released\n");
-			return false;
+	if (refcount_read(&skb->users) == 1) {
+		/* skb is attached, but it is already consumed. free it */
+		kfree_skb(skb);
+		slot->skb = NULL;
+
+		/* XXX: no need to check the existance of mbuf? */
+		if (slot->mbuf) {
+			lkl_ops->dpdkio_ops->mbuf_free(slot->mbuf);
+			slot->mbuf = NULL;
+			pr_info("!!!!!!!!!! release mbuf and reuse it!!\n");
 		}
+		return true;
 	}
 
-	/* ok, we can reuse this slot. if mbuf is attached, release it  */
-	mbuf = READ_ONCE(slot->mbuf);
-	if (mbuf) {
-		lkl_ops->dpdkio_ops->mbuf_free(mbuf);
-		WRITE_ONCE(slot->mbuf, NULL);
-		pr_info("!!!!!!!!!! release mbuf and reuse it!!\n");
-	}
-
-	return true;
+	return false;
 }
 
 struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
@@ -312,10 +310,20 @@ struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
 	truesize = (SKB_DATA_ALIGN(slot->segs[0].iov_len) +
 		    SKB_DATA_ALIGN(sizeof(struct skb_shared_info)));
 
+
 	skb = build_skb(slot->segs[0].iov_base, truesize);
 	if (!skb)
 		return NULL;
+
+
 	__skb_put(skb, slot->segs[0].iov_len);
+
+	/* Note, increment refcnt of skb. By this trick, skb is not
+	 * free()ed after a socket and other consumes this skb. They
+	 * calls kfree_skb(), and it calls skb_unref(), and then it
+	 * decrements the refcnt of skb. So, we can determine the skb
+	 * (and associating mbuf) can be freed if refcnt is 1 */
+	skb_get(skb);
 
 	for (n = 1; n < slot->nsegs; n++) {
 		seg = &slot->segs[n];
@@ -358,7 +366,7 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 	/* obtain free slots while walking around the rxslot ring */
 	for (i = 0, n = 0; n < LKL_DPDKIO_SLOT_NUM; n++) {
 		slot = &dpdk->rxslots[head];
-		if (dpdkio_recycle_rx_page(slot)) {
+		if (dpdkio_recycle_rx_slot(slot)) {
 			slots[i++] = slot;
 			if (i > b)
 				break;

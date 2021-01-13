@@ -126,8 +126,15 @@ static int dpdkio_close(struct net_device *dev)
 
 static void dpdkio_debug_slot(struct lkl_dpdkio_slot *slot, const char *prefix)
 {
+	int n;
+
 	pr_info("%s: nsegs=%d pkt_len=%u skb=0x%lx\n",
 		prefix, slot->nsegs, slot->pkt_len, (uintptr_t)slot->skb);
+
+	for (n = 0; n < slot->nsegs; n++) {
+		pr_info("%s: slot->segs[%d] is %ld-bytes\n",
+			prefix, n, slot->segs[n].iov_len);
+	}
 }
 
 static void dpdkio_fill_slot_tx_offload(struct sk_buff *skb,
@@ -241,8 +248,10 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 	 * qdisc? or check xmit_more?
 	 */
 	ret = lkl_ops->dpdkio_ops->tx(dpdk->portid, slot, 1);
-	if (unlikely(ret))
+	if (unlikely(ret == 0)) {
+		pr_err("dpdkio tx failed, returns 0\n");
 		dev->stats.tx_carrier_errors++;
+	}
 
 	/* advance the txhead */
 	dpdk->txhead = (dpdk->txhead + 1) & LKL_DPDKIO_SLOT_MASK;
@@ -326,8 +335,12 @@ struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
 				offset, seg->iov_len, seg->iov_len);
 	}
 
-	pr_info("skb->len is %u skb->data_len is %u\n", skb->len, skb->data_len);
+	pr_info("skb->len is %u skb->data_len is %u\n",
+		skb->len, skb->data_len);
+
+	skb_checksum_none_assert(skb);	/* XXX: RX checksum offload? */
 	skb->protocol = eth_type_trans(skb, dpdk->dev);
+
 
 	slot->skb = skb;
 
@@ -359,7 +372,7 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 	}
 
 	/* advnce rxhead */
-	dpdk->rxhead = head & LKL_DPDKIO_SLOT_MASK;
+	dpdk->rxhead = head;
 
 	/* receive packets into `slots` */
 	nr_rx = lkl_ops->dpdkio_ops->rx(dpdk->portid, slots, i);
@@ -403,7 +416,7 @@ static irqreturn_t dpdkio_handle_irq(int irq, void *data)
 	lkl_ops->dpdkio_ops->ack_rx_interrupt(dpdk->irq_ack_fd);
 
 	/* go to napi context */
-	napi_schedule_irqoff(&dpdk->napi);
+	napi_schedule(&dpdk->napi);
 
 	return IRQ_HANDLED;
 }
@@ -431,9 +444,8 @@ static int dpdkio_init_netdev(struct net_device *dev)
 	dev->features = (NETIF_F_SG |
 			 NETIF_F_TSO |
 			 NETIF_F_TSO6 |
-			 NETIF_F_RXCSUM |
-			 NETIF_F_HW_CSUM |
-			 NETIF_F_LRO);
+			 NETIF_F_HW_CSUM);
+	/* XXX: we needs NETIF_F_RXCSUM and NETIF_F_LRO */
 	dev->hw_features = dev->features;
 
 	dev->min_mtu = ETH_MIN_MTU;

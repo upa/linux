@@ -281,12 +281,14 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 
 	port_conf.txmode.offloads = dev_info.tx_offload_capa;
 
-
-
 	pr_info("port %d tx offload capa is 0x%lx\n",
 		portid, dev_info.tx_offload_capa);
 	pr_info("port %d tx offload conf is 0x%lx\n",
 		portid, port_conf.txmode.offloads);
+	pr_info("port %d rx offload capa is 0x%lx\n",
+		portid, dev_info.rx_offload_capa);
+	pr_info("port %d rx offload confi 0x%lx\n",
+		portid, port_conf.rxmode.offloads);
 
 	ret = rte_eth_dev_configure(portid, 1, 1, &port_conf);
 	if (ret < 0) {
@@ -557,6 +559,15 @@ static inline rte_iova_t dpdkio_seg_iova(struct dpdkio_port *port,
 static void dpdkio_fill_mbuf_tx_offload(struct lkl_dpdkio_slot *slot,
 					struct rte_mbuf *mbuf)
 {
+	switch (ntohs(slot->eth_protocol)) {
+	case ETH_P_IP:
+		mbuf->ol_flags = (PKT_TX_IPV4 | PKT_TX_IP_CKSUM);
+		break;
+	case ETH_P_IPV6:
+		mbuf->ol_flags = PKT_TX_IPV6;
+		break;
+	}
+
 	if (slot->ip_protocol == IPPROTO_TCP) {
 		mbuf->ol_flags |= PKT_TX_TCP_CKSUM;
 
@@ -566,12 +577,11 @@ static void dpdkio_fill_mbuf_tx_offload(struct lkl_dpdkio_slot *slot,
 			mbuf->l3_len = slot->l3_len;
 			mbuf->l4_len = slot->l4_len;
 			mbuf->tso_segsz = slot->tso_segsz;
-		}
 
-		if (slot->eth_protocol == htons(ETH_P_IP))
-			mbuf->ol_flags |= PKT_TX_IPV4;
-		else if (slot->eth_protocol == htons(ETH_P_IPV6))
-			mbuf->ol_flags |= PKT_TX_IPV6;
+			pr_info("l2_len=%u l3_len=%u l4_len=%u tso_segsz=%u\n",
+				mbuf->l2_len, mbuf->l3_len, mbuf->l4_len,
+				mbuf->tso_segsz);
+		}
 	}
 }
 
@@ -590,7 +600,7 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot *slots, int nb_pkts)
 		nsegs += slot->nsegs;
 	}
 
-	mbufcnt = 0;
+
 	ret = rte_pktmbuf_alloc_bulk(port->tx_mempool, mbufs, nsegs);
 	if (ret < 0)
 		return ret;
@@ -601,6 +611,7 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot *slots, int nb_pkts)
 	 */
 
 	/* attach packets to mbufs */
+	mbufcnt = 0;
 	mbufs_tx_cnt = 0;
 	for (n = 0; n < nb_pkts; n++) {
 
@@ -627,7 +638,7 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot *slots, int nb_pkts)
 			if (head == NULL) {
 				/* the first mbuf of this packet */
 				head = mbuf;
-				mbufs_tx[mbufs_tx_cnt++] = mbuf;
+				mbufs_tx[mbufs_tx_cnt] = mbuf;
 			} else {
 				ret = rte_pktmbuf_chain(head, mbuf);
 				if (unlikely(ret < 0)) {
@@ -638,10 +649,12 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot *slots, int nb_pkts)
 			}
 		}
 
-		dpdkio_fill_mbuf_tx_offload(slot, mbufs_tx[mbufs_tx_cnt - 1]);
+		dpdkio_fill_mbuf_tx_offload(slot, mbufs_tx[mbufs_tx_cnt]);
 
 		/* debug */
-		rte_pktmbuf_dump(stdout, mbufs_tx[mbufs_tx_cnt - 1], 16);
+		rte_pktmbuf_dump(stdout, mbufs_tx[mbufs_tx_cnt], 16);
+
+		mbufs_tx_cnt++;
 	}
 
 	ret = rte_eth_tx_burst(portid, 0, mbufs_tx, nb_pkts);

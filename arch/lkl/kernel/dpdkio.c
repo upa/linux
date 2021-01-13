@@ -201,6 +201,7 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 	slot = &dpdk->txslots[dpdk->txhead];
 	if (READ_ONCE(slot->skb)) {
 		/* slot is not released yet */
+		net_err_ratelimited("tx slot is full\n");
 		dev->stats.tx_dropped++;
 		return NETDEV_TX_BUSY;
 	}
@@ -271,19 +272,14 @@ static bool dpdkio_recycle_rx_page(struct lkl_dpdkio_slot *slot)
 {
 	struct page *page;
 	void *mbuf;
-	int n, ref;
+	int n;
 
 	/* XXX: ??????? */
 
 	for (n = 0; n < slot->nsegs; n++) {
 
 		page = virt_to_page(slot->segs[n].iov_base);
-		ref = page_ref_count(page);
-
-		if (ref == 0)
-			get_page(page); /* own free page */
-
-		if (ref > 1) {
+		if (page_ref_count(page) > 1) {
 			pr_info("not released\n");
 			return false;
 		}
@@ -339,8 +335,8 @@ struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
 		skb->len, skb->data_len);
 
 	skb_checksum_none_assert(skb);	/* XXX: RX checksum offload? */
-	skb->protocol = eth_type_trans(skb, dpdk->dev);
 
+	skb->protocol = eth_type_trans(skb, dpdk->dev);
 
 	slot->skb = skb;
 
@@ -371,8 +367,13 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 		head = (head + 1) & LKL_DPDKIO_SLOT_MASK;
 	}
 
+	if (i == 0) {
+		pr_err("no free rx pages!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+		return 0;
+	}
+
 	/* advnce rxhead */
-	dpdk->rxhead = head;
+	dpdk->rxhead = (head + 1) & LKL_DPDKIO_SLOT_MASK;
 
 	/* receive packets into `slots` */
 	nr_rx = lkl_ops->dpdkio_ops->rx(dpdk->portid, slots, i);
@@ -441,10 +442,14 @@ static int dpdkio_init_netdev(struct net_device *dev)
 
 	snprintf(dev->name, sizeof(dev->name), "dpdkio%d", dpdk->portid);
 
+#if 0
 	dev->features = (NETIF_F_SG |
 			 NETIF_F_TSO |
 			 NETIF_F_TSO6 |
 			 NETIF_F_HW_CSUM);
+#else
+	dev->features = 0;
+#endif
 	/* XXX: we needs NETIF_F_RXCSUM and NETIF_F_LRO */
 	dev->hw_features = dev->features;
 

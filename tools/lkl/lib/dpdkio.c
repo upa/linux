@@ -524,20 +524,17 @@ static void dpdkio_extmem_free_cb(void *addr, void *opaque)
 {
 	struct lkl_dpdkio_slot *slot = opaque;
 	struct rte_mbuf_ext_shared_info *shinfo;
-	uint16_t refcnt;
 
-	/* Note, all segments of a mbuf has an identical pointer to
+	/* Note, all segments of a mbuf has an identical pointer to a
 	 * shinfo. refcnt of shinfo indicates how many mbufs with
-	 * extmem have reference to the slot and shinfo.  free_cb
-	 * decrements the refcnt, and if it is 0, there is no mbuf
-	 * with extmem referencing the slot and shinfo. Then release
-	 * skb.
+	 * extmem have reference to the slot and shinfo. dpdk tx
+	 * process decerements refcnt, and if it is 0, there is no
+	 * mbuf with extmem referencing the slot and shinfo. Then
+	 * release skb.
 	 */
 
 	shinfo = dpdkio_get_mbuf_shared_info(slot);
-	refcnt = rte_mbuf_ext_refcnt_update(shinfo, -1);
-
-	if (refcnt == 0) {
+	if (rte_mbuf_ext_refcnt_read(shinfo) == 0) {
 		pr_info("free skb 0x%lx from dpdk\n", (uintptr_t)slot->skb);
 		lkl_host_ops.dpdkio_ops->free_skb(slot->skb);
 		slot->skb = NULL;

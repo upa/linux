@@ -13,10 +13,15 @@ int lkl_dpdkio_init(int argc, char **argv)
 
 #include <stdlib.h>
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
 #include <sys/eventfd.h>
 #include <linux/if_ether.h>
 
 #include <rte_eal.h>
+#include <rte_net.h>
 #include <rte_malloc.h>
 #include <rte_ethdev.h>
 #include <rte_cycles.h>
@@ -77,6 +82,9 @@ struct dpdkio_port {
 	/* tx */
 	char		tx_mempool_name[DPDKIO_MEM_NAME_MAX];
 	struct rte_mempool	*tx_mempool;
+
+	/* debug */
+	int	pcap_fd;	/* packet dump fd */
 };
 
 #define DPDKIO_PORT_MAX	32
@@ -86,6 +94,84 @@ static inline struct dpdkio_port *dpdkio_port_get(int portid)
 {
 	assert(portid < DPDKIO_PORT_MAX);
 	return &ports[portid];
+}
+
+/* just for debug!! */
+struct pcap_hdr {
+	uint32_t	magic_number;
+	uint16_t	version_major;
+	uint16_t	version_minor;
+	int		thiszone;
+	uint32_t	sigfigs;
+	uint32_t	snaplen;
+	uint32_t	network;
+};
+
+struct pcap_pkt_hdr {
+	uint32_t	ts_sec;
+	uint32_t	ts_usec;
+	uint32_t	incl_len;
+	uint32_t	orig_len;
+};
+
+static int pcap_init_file(const char *filename)
+{
+	struct pcap_hdr ph;
+	int fd, ret;
+
+	fd = open(filename, O_RDWR | O_CREAT,
+		  S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH);
+	if (fd < 0) {
+		fprintf(stderr, "failed to open %s: %s\n",
+			filename, strerror(errno));
+		return fd;
+	}
+
+	memset(&ph, 0, sizeof(ph));
+	ph.magic_number =  0xA1B2C3D4;
+	ph.version_major = 0x0002;
+	ph.version_minor = 0x0004;
+	ph.snaplen = 0xFFFF;
+	ph.network = 0x0001;
+
+	ret = write(fd, &ph, sizeof(ph));
+	if (ret < 0) {
+		fprintf(stderr, "failed to write pcap file header: %s\n",
+			strerror(errno));
+		return ret;
+	}
+
+	return fd;
+}
+
+static int pcap_write_packet(int fd, struct lkl_iovec *segs, int nsegs)
+{
+	struct pcap_pkt_hdr hdr;
+	int n, ret, pktlen = 0;
+
+	for (n = 0; n < nsegs; n++)
+		pktlen += segs[n].iov_len;
+
+	hdr.ts_sec = 0;
+	hdr.ts_usec = 0;
+	hdr.incl_len = pktlen;
+	hdr.orig_len = pktlen;
+
+	ret = write(fd, &hdr, sizeof(hdr));
+	if (ret < 0) {
+		fprintf(stderr, "failed to write a pcap pkt hdr: %s\n",
+			strerror(errno));
+		return -1;
+	}
+
+	ret = writev(fd, (struct iovec *)segs, nsegs);
+	if (ret < 0) {
+		fprintf(stderr, "failed to write a packet: %s\n",
+			strerror(errno));
+		return -1;
+	}
+
+	return 0;
 }
 
 
@@ -133,7 +219,7 @@ static int dpdkio_init_port(int portid)
 	/* tx mbuf can be small because packet payload is allocated
 	 * along with sk_buff. It is attached as extmem. */
 	port->tx_mempool = rte_pktmbuf_pool_create(port->tx_mempool_name,
-						   LKL_DPDKIO_SLOT_NUM,
+						   LKL_DPDKIO_SLOT_NUM * 2,
 						   LKL_DPDKIO_SLOT_NUM / 4,
 						   0, 64,
 						   rte_socket_id());
@@ -280,6 +366,7 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 	}
 
 	port_conf.txmode.offloads = dev_info.tx_offload_capa;
+	port_conf.rxmode.offloads = DEV_RX_OFFLOAD_CHECKSUM;
 
 	pr_info("port %d tx offload capa is 0x%lx\n",
 		portid, dev_info.tx_offload_capa);
@@ -287,7 +374,7 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 		portid, port_conf.txmode.offloads);
 	pr_info("port %d rx offload capa is 0x%lx\n",
 		portid, dev_info.rx_offload_capa);
-	pr_info("port %d rx offload confi 0x%lx\n",
+	pr_info("port %d rx offload conf is 0x%lx\n",
 		portid, port_conf.rxmode.offloads);
 
 	ret = rte_eth_dev_configure(portid, 1, 1, &port_conf);
@@ -317,6 +404,10 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 		       portid, strerror(ret * 1));
 		return ret;
 	}
+
+	/* just debug */
+	pr_warn("pcap debugging is enabled!!!!!!!!!!\n");
+	port->pcap_fd = pcap_init_file("debug.pcap");
 
 	return 0;
 }
@@ -463,11 +554,16 @@ static void dpdkio_disable_rx_interrupt(int portid)
 	__sync_synchronize();	/* XXX: heavy? */
 }
 
-static int dpdkio_rx_mbuf_to_slot(struct rte_mbuf *_mbuf,
+static int dpdkio_rx_mbuf_to_slot(int portid, struct rte_mbuf *_mbuf,
 				  struct lkl_dpdkio_slot *slot)
 {
+	struct rte_net_hdr_lens hdr_lens;
 	struct rte_mbuf *mbuf;
+	uint32_t ptype;
+	uint16_t mtu;
 	int n;
+
+	rte_pktmbuf_dump(stdout, _mbuf, 78);
 
 	if (_mbuf->nb_segs > LKL_DPDKIO_MAX_SEGS) {
 		pr_err("too many segments in a mbuf %d (> max %d)\n",
@@ -479,7 +575,7 @@ static int dpdkio_rx_mbuf_to_slot(struct rte_mbuf *_mbuf,
 	mbuf = _mbuf;
 
 	for (n = 0; n < _mbuf->nb_segs; n++) {
-		slot->segs[n].iov_base = mbuf->buf_addr + mbuf->data_off;
+		slot->segs[n].iov_base = rte_pktmbuf_mtod(mbuf, void *);
 		slot->segs[n].iov_len = mbuf->data_len;
 		mbuf = mbuf->next;
 	}
@@ -487,6 +583,51 @@ static int dpdkio_rx_mbuf_to_slot(struct rte_mbuf *_mbuf,
 	slot->nsegs = _mbuf->nb_segs;
 	slot->pkt_len = rte_pktmbuf_pkt_len(_mbuf);
 	slot->mbuf = _mbuf;
+
+	/* just debug !!!*/
+	do {
+		struct dpdkio_port *port = dpdkio_port_get(portid);
+		pcap_write_packet(port->pcap_fd, slot->segs, slot->nsegs);
+	} while (0);
+
+
+	switch (_mbuf->ol_flags & PKT_RX_IP_CKSUM_MASK) {
+	case PKT_RX_IP_CKSUM_GOOD:
+		slot->rx_ip_cksum_result = LKL_DPDKIO_RX_IP_CKSUM_GOOD;
+		break;
+	case PKT_RX_IP_CKSUM_UNKNOWN:
+		slot->rx_ip_cksum_result = LKL_DPDKIO_RX_IP_CKSUM_UNKNOWN;
+		break;
+	case PKT_RX_IP_CKSUM_BAD:
+		slot->rx_ip_cksum_result = LKL_DPDKIO_RX_IP_CKSUM_BAD;
+		break;
+	case PKT_RX_IP_CKSUM_NONE:
+		slot->rx_ip_cksum_result = LKL_DPDKIO_RX_IP_CKSUM_NONE;
+		break;
+	default:
+		slot->rx_ip_cksum_result = 0;
+	}
+
+
+	ptype = rte_net_get_ptype(_mbuf, &hdr_lens, RTE_PTYPE_ALL_MASK);
+
+	if ((ptype & RTE_PTYPE_L3_MASK) == RTE_PTYPE_L3_IPV4)
+		slot->eth_protocol = htons(ETH_P_IP);
+	else if ((ptype & RTE_PTYPE_L3_MASK) == RTE_PTYPE_L3_IPV6)
+		slot->eth_protocol = htons(ETH_P_IPV6);
+
+	if ((ptype & RTE_PTYPE_L4_MASK) == RTE_PTYPE_L4_TCP) {
+		slot->ip_protocol = IPPROTO_TCP;
+
+		slot->l2_len = hdr_lens.l2_len;
+		slot->l3_len = hdr_lens.l3_len;
+		slot->l4_len = hdr_lens.l4_len;
+		/* XXX: should consider encapsulation */
+
+		/* copied from __dpdk_net_rx() */
+		rte_eth_dev_get_mtu(portid, &mtu);
+		slot->tso_segsz = mtu - hdr_lens.l3_len - hdr_lens.l4_len;
+	}
 
 	return 0;
 }
@@ -499,7 +640,7 @@ static int dpdkio_rx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 	nb_rx = rte_eth_rx_burst(portid, 0, mbufs, nb_pkts);
 
 	for (i = 0, n = 0; n < nb_rx; n++) {
-		ret = dpdkio_rx_mbuf_to_slot(mbufs[n], slots[i]);
+		ret = dpdkio_rx_mbuf_to_slot(portid, mbufs[n], slots[i]);
 		if (unlikely(ret < 0))
 			continue; /* advance only mbuf index 'n', not 'i' */
 		i++;
@@ -597,7 +738,6 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot *slots, int nb_pkts)
 		nsegs += slot->nsegs;
 	}
 
-
 	ret = rte_pktmbuf_alloc_bulk(port->tx_mempool, mbufs, nsegs);
 	if (ret < 0)
 		return ret;
@@ -613,6 +753,10 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot *slots, int nb_pkts)
 	for (n = 0; n < nb_pkts; n++) {
 
 		slot = &slots[n];
+
+		/* pcap debugg!!  */
+		pcap_write_packet(port->pcap_fd, slot->segs, slot->nsegs);
+
 		shinfo = dpdkio_get_mbuf_shared_info(slot);
 		shinfo->free_cb = dpdkio_extmem_free_cb;
 		shinfo->fcb_opaque = slot;
@@ -653,6 +797,7 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot *slots, int nb_pkts)
 
 		mbufs_tx_cnt++;
 	}
+
 
 	ret = rte_eth_tx_burst(portid, 0, mbufs_tx, nb_pkts);
 

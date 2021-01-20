@@ -142,13 +142,18 @@ static void dpdkio_fill_slot_tx_offload(struct sk_buff *skb,
 {
 	unsigned char *l2, *l3, *l4, *l5;
 	struct tcphdr *tcp;
+	int err;
 
-	pr_info("hoge\n");
-
-	if (skb->ip_summed != CHECKSUM_PARTIAL)
+	if (skb->ip_summed != CHECKSUM_PARTIAL) {
+		pr_info("not checksum partial\n");
 		return;
+	}
 
-	pr_info("hoge\n");
+	err = skb_cow_head(skb, 0);
+	if (err < 0) {
+		pr_info("skb_cow_head failed\n");
+		return;
+	}
 
 	slot->tso_segsz = 0;
 	slot->eth_protocol = skb->protocol;
@@ -190,23 +195,29 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 	struct dpdkio_dev *dpdk = netdev_priv(dev);
 	struct skb_frag_struct *frag;
 	struct lkl_dpdkio_slot *slot;
-	unsigned int data_len, size;
-	unsigned short f;
+	unsigned int data_len, size, pkt_len;
 	struct iovec *seg;
+	unsigned short f;
 	int ret;
 
 	/* XXX: we assume that there is no race conditions on the
 	 * dpdkio TX path because of LKL */
 
+	pr_info("try to xmit pkt\n");
+
+	pr_info("gso_size is %u type is %u\n",
+		skb_shinfo(skb)->gso_size, skb_shinfo(skb)->gso_type);
+
 	slot = &dpdk->txslots[dpdk->txhead];
 	if (READ_ONCE(slot->skb)) {
 		/* slot is not released yet */
-		net_err_ratelimited("tx slot is full\n");
+		pr_err("tx slot is full\n");
 		dev->stats.tx_dropped++;
 		return NETDEV_TX_BUSY;
 	}
 
 	/* let's fill the slot slot */
+	pkt_len = skb->len;
 	slot->pkt_len = skb->len;
 	slot->nsegs = skb_shinfo(skb)->nr_frags + 1;
 	if (unlikely(slot->nsegs > LKL_DPDKIO_MAX_SEGS)) {
@@ -254,6 +265,9 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 		dev->stats.tx_carrier_errors++;
 	}
 
+	dev->stats.tx_packets++;
+	dev->stats.tx_bytes += pkt_len;
+
 	/* advance the txhead */
 	dpdk->txhead = (dpdk->txhead + 1) & LKL_DPDKIO_SLOT_MASK;
 	/* XXX: do we need memory barrier? */
@@ -264,6 +278,8 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 
 out_drop:
 	dev_kfree_skb_any(skb);
+
+	pr_err("xmit failed\n");
 
 	return NETDEV_TX_OK;
 }
@@ -294,6 +310,22 @@ static bool dpdkio_recycle_rx_slot(struct lkl_dpdkio_slot *slot)
 	return false;
 }
 
+static void dpdkio_rx_cksum(struct dpdkio_dev *dpdk,
+			    struct lkl_dpdkio_slot *slot, struct sk_buff *skb)
+{
+	skb_checksum_none_assert(skb);	/* XXX: RX checksum offload? */
+
+	if (slot->rx_ip_cksum_result == LKL_DPDKIO_RX_IP_CKSUM_GOOD) {
+		skb->ip_summed = CHECKSUM_UNNECESSARY;
+		pr_info("good checksum\n");
+		return;
+	}
+
+	if (slot->rx_ip_cksum_result == LKL_DPDKIO_RX_IP_CKSUM_BAD ||
+	    slot->rx_ip_cksum_result == LKL_DPDKIO_RX_IP_CKSUM_NONE)
+		dpdk->dev->stats.rx_errors++;
+}
+
 struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
 				      struct lkl_dpdkio_slot *slot)
 {
@@ -301,6 +333,7 @@ struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
 	struct iovec *seg;
 	struct page *page;
 	uint64_t offset, phy_addr;
+	unsigned int gso_type = 0;
 	uint32_t truesize;
 	int n;
 
@@ -339,14 +372,32 @@ struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
 				offset, seg->iov_len, seg->iov_len);
 	}
 
-	pr_info("skb->len is %u skb->data_len is %u\n",
-		skb->len, skb->data_len);
+	dpdkio_rx_cksum(dpdk, slot, skb);
 
-	skb_checksum_none_assert(skb);	/* XXX: RX checksum offload? */
+	if (slot->ip_protocol == IPPROTO_TCP) {
+		if (slot->eth_protocol == htons(ETH_P_IP))
+			gso_type = SKB_GSO_TCPV4;
+		else if (slot->eth_protocol == htons(ETH_P_IPV6))
+			gso_type = SKB_GSO_TCPV6;
+		/* XXX: UDP GSO?? */
+
+		skb_shinfo(skb)->gso_size = slot->tso_segsz;
+		skb_shinfo(skb)->gso_type = gso_type;
+
+		/* XXX: copied from virtio_net_hdr_to_skb() */
+		skb_shinfo(skb)->gso_type |= SKB_GSO_DODGY;
+		skb_shinfo(skb)->gso_segs = 0;
+	}
 
 	skb->protocol = eth_type_trans(skb, dpdk->dev);
 
 	slot->skb = skb;
+
+	pr_info("skb->len is %u skb->data_len is %u\n",
+		skb->len, skb->data_len);
+	pr_info("gso_size is %u type is %u\n",
+		skb_shinfo(skb)->gso_size, skb_shinfo(skb)->gso_type);
+
 
 	return skb;
 }
@@ -450,15 +501,13 @@ static int dpdkio_init_netdev(struct net_device *dev)
 
 	snprintf(dev->name, sizeof(dev->name), "dpdkio%d", dpdk->portid);
 
-#if 0
 	dev->features = (NETIF_F_SG |
 			 NETIF_F_TSO |
 			 NETIF_F_TSO6 |
-			 NETIF_F_HW_CSUM);
-#else
-	dev->features = 0;
-#endif
-	/* XXX: we needs NETIF_F_RXCSUM and NETIF_F_LRO */
+			 NETIF_F_HW_CSUM |
+			 NETIF_F_RXCSUM);
+
+	/* XXX: we needs NETIF_F_LRO */
 	dev->hw_features = dev->features;
 
 	dev->min_mtu = ETH_MIN_MTU;

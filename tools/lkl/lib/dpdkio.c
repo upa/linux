@@ -84,7 +84,8 @@ struct dpdkio_port {
 	struct rte_mempool	*tx_mempool;
 
 	/* debug */
-	int	pcap_fd;	/* packet dump fd */
+	int	tx_pcap_fd;	/* packet dump fd */
+	int	rx_pcap_fd;
 };
 
 #define DPDKIO_PORT_MAX	32
@@ -171,6 +172,8 @@ static int pcap_write_packet(int fd, struct lkl_iovec *segs, int nsegs)
 		return -1;
 	}
 
+	fsync(fd);
+
 	return 0;
 }
 
@@ -219,8 +222,8 @@ static int dpdkio_init_port(int portid)
 	/* tx mbuf can be small because packet payload is allocated
 	 * along with sk_buff. It is attached as extmem. */
 	port->tx_mempool = rte_pktmbuf_pool_create(port->tx_mempool_name,
+						   LKL_DPDKIO_SLOT_NUM << 4,
 						   LKL_DPDKIO_SLOT_NUM,
-						   LKL_DPDKIO_SLOT_NUM / 4,
 						   0, 64,
 						   rte_socket_id());
 	if (!port->tx_mempool) {
@@ -408,7 +411,8 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 
 	/* just debug */
 	pr_warn("pcap debugging is enabled!!!!!!!!!!\n");
-	port->pcap_fd = pcap_init_file("debug.pcap");
+	port->tx_pcap_fd = pcap_init_file("debug-tx.pcap");
+	port->rx_pcap_fd = pcap_init_file("debug-rx.pcap");
 
 	return 0;
 }
@@ -593,7 +597,7 @@ static int dpdkio_rx_mbuf_to_slot(int portid, struct rte_mbuf *_mbuf,
 	/* just debug !!!*/
 	do {
 		struct dpdkio_port *port = dpdkio_port_get(portid);
-		pcap_write_packet(port->pcap_fd, slot->segs, slot->nsegs);
+		pcap_write_packet(port->rx_pcap_fd, slot->segs, slot->nsegs);
 	} while (0);
 
 
@@ -682,6 +686,8 @@ static void dpdkio_extmem_free_cb(void *addr, void *opaque)
 	 * process decerements refcnt, and if it is 0, there is no
 	 * mbuf with extmem referencing the slot and shinfo. Then
 	 * release skb.
+	 *
+	 * ^- it is changed. chained mbufs is counted as refcnt 1?
 	 */
 
 	shinfo = dpdkio_get_mbuf_shared_info(slot);
@@ -690,6 +696,9 @@ static void dpdkio_extmem_free_cb(void *addr, void *opaque)
 		lkl_host_ops.dpdkio_ops->free_skb(slot->skb);
 		slot->skb = NULL;
 		__sync_synchronize();
+	} else {
+		pr_warn("ext refcnt is %u\n",
+			rte_mbuf_ext_refcnt_read(shinfo));
 	}
 }
 
@@ -765,19 +774,21 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot *slots, int nb_pkts)
 		slot = &slots[n];
 
 		/* pcap debugg!!  */
-		pcap_write_packet(port->pcap_fd, slot->segs, slot->nsegs);
+		pcap_write_packet(port->tx_pcap_fd, slot->segs, slot->nsegs);
 
 		shinfo = dpdkio_get_mbuf_shared_info(slot);
 		shinfo->free_cb = dpdkio_extmem_free_cb;
 		shinfo->fcb_opaque = slot;
-		rte_mbuf_ext_refcnt_set(shinfo, 0);
+		rte_mbuf_ext_refcnt_set(shinfo, 1);
+		/* XXX: Note, multiple mubfs share a same shinfo, but,
+		 * its refcnt is 1, not the number of mbufs of a packet.
+		 */
+
 		head = NULL;
 
 		for (i = 0; i < slot->nsegs; i++) {
 			struct lkl_iovec *seg = &slot->segs[i];
 			struct rte_mbuf *mbuf = mbufs[mbufcnt++];
-
-			rte_mbuf_ext_refcnt_update(shinfo, 1);
 
 			rte_pktmbuf_attach_extbuf(mbuf,
 						  seg->iov_base,

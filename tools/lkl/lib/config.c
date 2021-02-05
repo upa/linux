@@ -533,7 +533,7 @@ static int lkl_config_netdev_create(struct lkl_config *cfg,
 
 		if (strcmp(iface->iftype, "vhost-net") == 0)
 			ret = lkl_vhost_net_add(iface->ifparams, &nd_args);
-		if (strcmp(iface->iftype, "dpdkio") == 0) {
+		else if (strcmp(iface->iftype, "dpdkio") == 0) {
 			/* XXX: how to create a dpdkio device from the
 			 * beckend side? do we need a new syscall like
 			 * virtio? */

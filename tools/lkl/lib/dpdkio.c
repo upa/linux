@@ -219,7 +219,7 @@ static int dpdkio_init_port(int portid)
 	/* tx mbuf can be small because packet payload is allocated
 	 * along with sk_buff. It is attached as extmem. */
 	port->tx_mempool = rte_pktmbuf_pool_create(port->tx_mempool_name,
-						   LKL_DPDKIO_SLOT_NUM * 2,
+						   LKL_DPDKIO_SLOT_NUM,
 						   LKL_DPDKIO_SLOT_NUM / 4,
 						   0, 64,
 						   rte_socket_id());
@@ -397,6 +397,7 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 	/* XXX: TX offload setting here */
 	struct rte_eth_txconf txconf = dev_info.default_txconf;
 	txconf.offloads = port_conf.txmode.offloads;
+	txconf.tx_free_thresh = nb_txd >> 1;	/* half of descriptors */
 	ret = rte_eth_tx_queue_setup(portid, 0, nb_txd, SOCKET_ID_ANY,
 				     &txconf);
 	if (ret < 0) {
@@ -584,6 +585,11 @@ static int dpdkio_rx_mbuf_to_slot(int portid, struct rte_mbuf *_mbuf,
 	slot->pkt_len = rte_pktmbuf_pkt_len(_mbuf);
 	slot->mbuf = _mbuf;
 
+	/* initialize */
+	slot->tx_offload = 0;
+	slot->eth_protocol = 0;
+	slot->ip_protocol = 0;
+
 	/* just debug !!!*/
 	do {
 		struct dpdkio_port *port = dpdkio_port_get(portid);
@@ -626,7 +632,11 @@ static int dpdkio_rx_mbuf_to_slot(int portid, struct rte_mbuf *_mbuf,
 
 		/* copied from __dpdk_net_rx() */
 		rte_eth_dev_get_mtu(portid, &mtu);
-		slot->tso_segsz = mtu - hdr_lens.l3_len - hdr_lens.l4_len;
+
+		if (slot->pkt_len > mtu) {
+			slot->tso_segsz = (mtu - hdr_lens.l3_len -
+					   hdr_lens.l4_len);
+		}
 	}
 
 	return 0;

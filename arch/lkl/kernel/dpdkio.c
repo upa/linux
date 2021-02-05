@@ -189,6 +189,29 @@ static void dpdkio_fill_slot_tx_offload(struct sk_buff *skb,
 	slot->l4_len = (l5) ? l5 - l4 : 0;
 }
 
+static struct lkl_dpdkio_slot *dpdkio_get_free_tx_slot(struct dpdkio_dev *dpdk)
+{
+	struct lkl_dpdkio_slot *s, *slot = NULL;
+	uint32_t txhead;
+
+	txhead = dpdk->txhead;
+
+	do {
+		s = &dpdk->txslots[txhead];
+		if (!s->skb) {
+			slot = s;
+			break;
+		}
+		/* advance the txhead */
+		txhead = (txhead + 1) & LKL_DPDKIO_SLOT_MASK;
+	} while (txhead != dpdk->txhead);
+
+	if (slot)
+		dpdk->txhead = txhead;
+
+	return slot;
+}
+
 static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 				     struct net_device *dev)
 {
@@ -208,10 +231,11 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 	pr_info("gso_size is %u type is %u\n",
 		skb_shinfo(skb)->gso_size, skb_shinfo(skb)->gso_type);
 
+	slot = dpdkio_get_free_tx_slot(dpdk);
 	slot = &dpdk->txslots[dpdk->txhead];
 	if (READ_ONCE(slot->skb)) {
 		/* slot is not released yet */
-		pr_err("tx slot is full\n");
+		panic("tx slot is full\n");
 		dev->stats.tx_dropped++;
 		return NETDEV_TX_BUSY;
 	}
@@ -261,16 +285,13 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 	 */
 	ret = lkl_ops->dpdkio_ops->tx(dpdk->portid, slot, 1);
 	if (unlikely(ret == 0)) {
-		pr_err("dpdkio tx failed, returns 0\n");
+		pr_err("dpdkio tx failed, returns 0 !!!!!!!!!!!!!!!!!!!\n");
 		dev->stats.tx_carrier_errors++;
 	}
 
 	dev->stats.tx_packets++;
 	dev->stats.tx_bytes += pkt_len;
 
-	/* advance the txhead */
-	dpdk->txhead = (dpdk->txhead + 1) & LKL_DPDKIO_SLOT_MASK;
-	/* XXX: do we need memory barrier? */
 
 	dpdkio_debug_slot(slot, "tx");
 
@@ -374,7 +395,7 @@ struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
 
 	dpdkio_rx_cksum(dpdk, slot, skb);
 
-	if (slot->ip_protocol == IPPROTO_TCP) {
+	if (slot->ip_protocol == IPPROTO_TCP && slot->tso_segsz) {
 		if (slot->eth_protocol == htons(ETH_P_IP))
 			gso_type = SKB_GSO_TCPV4;
 		else if (slot->eth_protocol == htons(ETH_P_IPV6))
@@ -501,12 +522,16 @@ static int dpdkio_init_netdev(struct net_device *dev)
 
 	snprintf(dev->name, sizeof(dev->name), "dpdkio%d", dpdk->portid);
 
+#if 1
 	dev->features = (NETIF_F_SG |
 			 NETIF_F_TSO |
 			 NETIF_F_TSO6 |
 			 NETIF_F_HW_CSUM |
 			 NETIF_F_RXCSUM);
-
+#else
+	dev->features = (NETIF_F_HW_CSUM |
+			 NETIF_F_RXCSUM);
+#endif
 	/* XXX: we needs NETIF_F_LRO */
 	dev->hw_features = dev->features;
 

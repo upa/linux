@@ -83,9 +83,11 @@ struct dpdkio_port {
 	char		tx_mempool_name[DPDKIO_MEM_NAME_MAX];
 	struct rte_mempool	*tx_mempool;
 
+#ifdef DEBUG_PCAP
 	/* debug */
 	int	tx_pcap_fd;	/* packet dump fd */
 	int	rx_pcap_fd;
+#endif
 };
 
 #define DPDKIO_PORT_MAX	32
@@ -97,6 +99,7 @@ static inline struct dpdkio_port *dpdkio_port_get(int portid)
 	return &ports[portid];
 }
 
+#ifdef DEBUG_PCAP
 /* just for debug!! */
 struct pcap_hdr {
 	uint32_t	magic_number;
@@ -177,7 +180,7 @@ static int pcap_write_packet(int fd, struct lkl_iovec *segs, int nsegs)
 	return 0;
 }
 
-
+#endif /* DEBUG_PCAP */
 
 static void *dpdkio_malloc(int size)
 {
@@ -410,9 +413,10 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 	}
 
 	/* just debug */
-	pr_warn("pcap debugging is enabled!!!!!!!!!!\n");
+#ifdef DEBUG_PCAP
 	port->tx_pcap_fd = pcap_init_file("debug-tx.pcap");
 	port->rx_pcap_fd = pcap_init_file("debug-rx.pcap");
+#endif
 
 	return 0;
 }
@@ -472,10 +476,9 @@ static void dpdkio_rx_poll_thread(void *arg)
 
 		if (wait == 0) {
 			/* there are pending packet(s) in the rx queue */
-			if (port->poll_enabled) {
-				pr_info("deliver irq, nb_rx is %d\n", nb_rx);
+			if (port->poll_enabled)
 				dpdkio_deliver_irq(port);
-			} else
+			else
 				rte_delay_us_sleep(1);
 		} else
 			rte_delay_us_sleep(wait);
@@ -568,8 +571,6 @@ static int dpdkio_rx_mbuf_to_slot(int portid, struct rte_mbuf *_mbuf,
 	uint16_t mtu;
 	int n;
 
-	rte_pktmbuf_dump(stdout, _mbuf, 78);
-
 	if (_mbuf->nb_segs > LKL_DPDKIO_MAX_SEGS) {
 		pr_err("too many segments in a mbuf %d (> max %d)\n",
 		       _mbuf->nb_segs, LKL_DPDKIO_MAX_SEGS);
@@ -595,11 +596,12 @@ static int dpdkio_rx_mbuf_to_slot(int portid, struct rte_mbuf *_mbuf,
 	slot->ip_protocol = 0;
 
 	/* just debug !!!*/
+#ifdef DEBUG_PCAP
 	do {
 		struct dpdkio_port *port = dpdkio_port_get(portid);
 		pcap_write_packet(port->rx_pcap_fd, slot->segs, slot->nsegs);
 	} while (0);
-
+#endif
 
 	switch (_mbuf->ol_flags & PKT_RX_IP_CKSUM_MASK) {
 	case PKT_RX_IP_CKSUM_GOOD:
@@ -678,7 +680,6 @@ dpdkio_get_mbuf_shared_info(struct lkl_dpdkio_slot *slot)
 static void dpdkio_extmem_free_cb(void *addr, void *opaque)
 {
 	struct lkl_dpdkio_slot *slot = opaque;
-	struct rte_mbuf_ext_shared_info *shinfo;
 
 	/* Note, all segments of a mbuf has an identical pointer to a
 	 * shinfo. refcnt of shinfo indicates how many mbufs with
@@ -690,16 +691,9 @@ static void dpdkio_extmem_free_cb(void *addr, void *opaque)
 	 * ^- it is changed. chained mbufs is counted as refcnt 1?
 	 */
 
-	shinfo = dpdkio_get_mbuf_shared_info(slot);
-	if (rte_mbuf_ext_refcnt_read(shinfo) == 0) {
-		pr_info("free skb 0x%lx from dpdk\n", (uintptr_t)slot->skb);
-		lkl_host_ops.dpdkio_ops->free_skb(slot->skb);
-		slot->skb = NULL;
-		__sync_synchronize();
-	} else {
-		pr_warn("ext refcnt is %u\n",
-			rte_mbuf_ext_refcnt_read(shinfo));
-	}
+	lkl_host_ops.dpdkio_ops->free_skb(slot->skb);
+	slot->skb = NULL;
+	__sync_synchronize();
 }
 
 static inline rte_iova_t dpdkio_seg_iova(struct dpdkio_port *port,
@@ -734,10 +728,6 @@ static void dpdkio_fill_mbuf_tx_offload(struct lkl_dpdkio_slot *slot,
 			mbuf->l3_len = slot->l3_len;
 			mbuf->l4_len = slot->l4_len;
 			mbuf->tso_segsz = slot->tso_segsz;
-
-			pr_info("l2_len=%u l3_len=%u l4_len=%u tso_segsz=%u\n",
-				mbuf->l2_len, mbuf->l3_len, mbuf->l4_len,
-				mbuf->tso_segsz);
 		}
 	}
 }
@@ -773,8 +763,10 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot *slots, int nb_pkts)
 
 		slot = &slots[n];
 
+#ifdef DEBUG_PCAP
 		/* pcap debugg!!  */
 		pcap_write_packet(port->tx_pcap_fd, slot->segs, slot->nsegs);
+#endif
 
 		shinfo = dpdkio_get_mbuf_shared_info(slot);
 		shinfo->free_cb = dpdkio_extmem_free_cb;
@@ -812,9 +804,6 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot *slots, int nb_pkts)
 		}
 
 		dpdkio_fill_mbuf_tx_offload(slot, mbufs_tx[mbufs_tx_cnt]);
-
-		/* debug */
-		rte_pktmbuf_dump(stdout, mbufs_tx[mbufs_tx_cnt], 16);
 
 		mbufs_tx_cnt++;
 	}

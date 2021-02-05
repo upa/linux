@@ -144,16 +144,12 @@ static void dpdkio_fill_slot_tx_offload(struct sk_buff *skb,
 	struct tcphdr *tcp;
 	int err;
 
-	if (skb->ip_summed != CHECKSUM_PARTIAL) {
-		pr_info("not checksum partial\n");
+	if (skb->ip_summed != CHECKSUM_PARTIAL)
 		return;
-	}
 
 	err = skb_cow_head(skb, 0);
-	if (err < 0) {
-		pr_info("skb_cow_head failed\n");
+	if (err < 0)
 		return;
-	}
 
 	slot->tso_segsz = 0;
 	slot->eth_protocol = skb->protocol;
@@ -175,17 +171,14 @@ static void dpdkio_fill_slot_tx_offload(struct sk_buff *skb,
 		else
 			slot->tso_segsz = skb->len;
 
-		pr_info("tcp\n");
 		break;
 
 	case offsetof(struct udphdr, check):
 		slot->ip_protocol = IPPROTO_UDP;
 		l5 = l4 + sizeof(struct udphdr);
-		pr_info("udp\n");
 		break;
 
 	default:
-		pr_info("fall through\n");
 		slot->ip_protocol = 0;
 		l5 = NULL;
 	}
@@ -231,11 +224,6 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 
 	/* XXX: we assume that there is no race conditions on the
 	 * dpdkio TX path because of LKL */
-
-	pr_info("try to xmit pkt\n");
-
-	pr_info("gso_size is %u type is %u\n",
-		skb_shinfo(skb)->gso_size, skb_shinfo(skb)->gso_type);
 
 	slot = dpdkio_get_free_tx_slot(dpdk);
 	if (!slot) {
@@ -290,23 +278,18 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 	 */
 	ret = lkl_ops->dpdkio_ops->tx(dpdk->portid, slot, 1);
 	if (unlikely(ret == 0)) {
-		pr_err("dpdkio tx failed, returns 0 !!!!!!!!!!!!!!!!!!!\n");
+		net_err_ratelimited("dpdkio tx failed\n");
 		dev->stats.tx_carrier_errors++;
 	}
 
 	dev->stats.tx_packets++;
 	dev->stats.tx_bytes += pkt_len;
-	pr_info("tx pkt cnt %lu\n", dev->stats.tx_packets);
 
-
-	dpdkio_debug_slot(slot, "tx");
 
 	return NETDEV_TX_OK;
 
 out_drop:
 	dev_kfree_skb_any(skb);
-
-	pr_err("xmit failed\n");
 
 	return NETDEV_TX_OK;
 }
@@ -321,15 +304,14 @@ static bool dpdkio_recycle_rx_slot(struct lkl_dpdkio_slot *slot)
 	skb = slot->skb;
 
 	if (refcount_read(&skb->users) == 1) {
-		/* skb is attached, but it is already consumed. free it */
+		/* skb is attached, but it is already consumed. relelase
+		 * skb and associating mbuf */
 		kfree_skb(skb);
 		slot->skb = NULL;
 
-		/* XXX: no need to check the existance of mbuf? */
 		if (slot->mbuf) {
 			lkl_ops->dpdkio_ops->mbuf_free(slot->mbuf);
 			slot->mbuf = NULL;
-			pr_info("!!!!!!!!!! release mbuf and reuse it!!\n");
 		}
 		return true;
 	}
@@ -344,7 +326,6 @@ static void dpdkio_rx_cksum(struct dpdkio_dev *dpdk,
 
 	if (slot->rx_ip_cksum_result == LKL_DPDKIO_RX_IP_CKSUM_GOOD) {
 		skb->ip_summed = CHECKSUM_UNNECESSARY;
-		pr_info("good checksum\n");
 		return;
 	}
 
@@ -420,12 +401,6 @@ struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
 
 	slot->skb = skb;
 
-	pr_info("skb->len is %u skb->data_len is %u\n",
-		skb->len, skb->data_len);
-	pr_info("gso_size is %u type is %u\n",
-		skb_shinfo(skb)->gso_size, skb_shinfo(skb)->gso_type);
-
-
 	return skb;
 }
 
@@ -453,8 +428,8 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 		head = (head + 1) & LKL_DPDKIO_SLOT_MASK;
 	}
 
-	if (i == 0) {
-		pr_err("no free rx pages!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+	if (unlikely(i == 0)) {
+		panic("no free rx slots\n");
 		return 0;
 	}
 
@@ -476,7 +451,6 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 			continue;
 		}
 
-		pr_info("recv %u-byte pkt\n", skb->len);
 		napi_gro_receive(&dpdk->napi, skb);
 
 		nr_pkts++;

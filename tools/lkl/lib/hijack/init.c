@@ -15,12 +15,17 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <signal.h>
+#include <assert.h>
 #include <lkl.h>
 #include <lkl_host.h>
 #include <lkl_config.h>
 
+#include <sys/eventfd.h>
+
 #include "xlate.h"
 #include "init.h"
+
+#include "../dpdkio.h"
 
 #define __USE_GNU
 #include <dlfcn.h>
@@ -52,6 +57,14 @@ static void PinToFirstCpu(const cpu_set_t* cpus)
 			return;
 		}
 	}
+}
+
+int event_fds[EVENTFDS_NUM];
+int event_cnt;
+int get_host_eventfd()
+{
+	int fd = event_fds[event_cnt++];
+	return fd;
 }
 
 int lkl_debug, lkl_running;
@@ -111,6 +124,11 @@ static int config_load(void)
 	return ret;
 }
 
+static char *ealargs[] = {
+	"-c", "1",
+	"-n", "1",
+};
+
 void __attribute__((constructor))
 hijack_init(void)
 {
@@ -121,6 +139,10 @@ hijack_init(void)
 	ret = config_load();
 	if (ret < 0)
 		return;
+
+	ret = lkl_dpdkio_init(sizeof(ealargs) / sizeof(ealargs[0]), ealargs);
+	if (ret)
+		assert(0);
 
 	/* reflect pre-configuration */
 	lkl_load_config_pre(cfg);
@@ -178,13 +200,18 @@ hijack_init(void)
 	}
 #endif
 
+
+
+	/* before start kernel, save eventfds */
+	int n;
+	for (n = 0; n < EVENTFDS_NUM; n++)
+		event_fds[n] = eventfd(0, 0);
+
 	ret = lkl_start_kernel(&lkl_host_ops, cfg->boot_cmdline);
 	if (ret) {
 		fprintf(stderr, "can't start kernel: %s\n", lkl_strerror(ret));
 		return;
 	}
-
-	lkl_running = 1;
 
 	/* initialize epoll manage list */
 	memset(dual_fds, -1, sizeof(int) * LKL_FD_OFFSET);
@@ -215,6 +242,11 @@ hijack_init(void)
 
 	/* reflect post-configuration */
 	lkl_load_config_post(cfg);
+
+
+	sleep(1);
+	printf("set lkl_running 1\n");
+	lkl_running = 1;
 }
 
 void __attribute__((destructor))

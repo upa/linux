@@ -26,6 +26,7 @@
 #include <sys/ioctl.h>
 #include <assert.h>
 #include <pthread.h>
+#include <sys/syscall.h>
 #include <lkl.h>
 #include <lkl_host.h>
 
@@ -72,7 +73,7 @@ int dual_fds[LKL_FD_OFFSET];
 									\
 		if (!host_calls[__lkl__NR_##name])			\
 			host_calls[__lkl__NR_##name] = resolve_sym(#name); \
-		if (!is_lklfd(p1))					\
+		if (!is_lklfd(p1) || !lkl_running)			\
 			return host_calls[__lkl__NR_##name](p1, p2, p3,	\
 							    p4, p5, p6); \
 									\
@@ -218,7 +219,7 @@ int ioctl(int fd, int req, ...)
 
 	CHECK_HOST_CALL(ioctl);
 
-	if (!is_lklfd(fd))
+	if (!is_lklfd(fd) || !lkl_running)
 		return host_ioctl(fd, req, arg);
 	return lkl_call(__lkl__NR_ioctl, 3, fd, lkl_ioctl_req_xlate(req), arg);
 }
@@ -236,7 +237,7 @@ int fcntl(int fd, int cmd, ...)
 
 	CHECK_HOST_CALL(fcntl);
 
-	if (!is_lklfd(fd))
+	if (!is_lklfd(fd) || !lkl_running)
 		return host_fcntl(fd, cmd, arg);
 	return lkl_call(__lkl__NR_fcntl, 3, fd, lkl_fcntl_cmd_xlate(cmd), arg);
 }
@@ -312,7 +313,7 @@ int close(int fd)
 {
 	CHECK_HOST_CALL(close);
 
-	if (!is_lklfd(fd)) {
+	if (!is_lklfd(fd) || !lkl_running) {
 		/* handle epoll's dual_fd */
 		if ((dual_fds[fd] != -1) && lkl_running) {
 			lkl_call(__lkl__NR_close, 1, dual_fds[fd]);
@@ -325,6 +326,7 @@ int close(int fd)
 	return lkl_call(__lkl__NR_close, 1, fd);
 }
 
+#if 0
 HOST_CALL(epoll_create);
 int epoll_create(int size)
 {
@@ -375,7 +377,7 @@ int epoll_ctl(int epollfd, int op, int fd, struct epoll_event *event)
 {
 	CHECK_HOST_CALL(epoll_ctl);
 
-	if (!is_lklfd(fd))
+	if (!is_lklfd(fd) || !lkl_running)
 		return host_epoll_ctl(epollfd, op, fd, event);
 
 	return lkl_call(__lkl__NR_epoll_ctl, 4, dual_fds[epollfd],
@@ -420,6 +422,9 @@ int epoll_wait(int epfd, struct epoll_event *events,
 	pthread_t thread;
 	void *trv_val;
 	int i, ret, ret_lkl, ret_host;
+
+	if (!lkl_running)
+		return host_epoll_wait(epfd, events, maxevents, timeout);
 
 	ret = lkl_sys_pipe(l_pipe);
 	if (ret == -1) {
@@ -543,14 +548,19 @@ int epoll_wait(int epfd, struct epoll_event *events,
 	return ret;
 }
 
+#endif
+
+
+HOST_CALL(eventfd)
 int eventfd(unsigned int count, int flags)
 {
 	if (!lkl_running) {
-		int (*f)(unsigned int, int) = resolve_sym("eventfd");
-
-		return f(count, flags);
+		int fd;
+		fd = host_eventfd(count, flags);
+		if (is_lklfd(fd))
+			return get_host_eventfd();
+		return fd;
 	}
-
 	return lkl_sys_eventfd2(count, flags);
 }
 
@@ -578,13 +588,15 @@ int eventfd_write(int fd, uint64_t value)
 			     sizeof(value)) != sizeof(value) ? -1 : 0;
 }
 
+
 HOST_CALL(mmap)
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 {
 	CHECK_HOST_CALL(mmap);
 
 	if (addr != NULL || flags != (MAP_ANONYMOUS|MAP_PRIVATE) ||
-	    prot != (PROT_READ|PROT_WRITE) || fd != -2 || offset != 0)
+	    prot != (PROT_READ|PROT_WRITE) || fd != -2 || offset != 0 ||
+	    !lkl_running)
 		return (void *)host_mmap(addr, length, prot, flags, fd, offset);
 	return lkl_sys_mmap(addr, length, prot, flags, fd, offset);
 }
@@ -592,6 +604,12 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 #ifndef __ANDROID__
 HOST_CALL(__xstat64)
 int stat(const char *pathname, struct stat *buf)
+{
+	CHECK_HOST_CALL(__xstat64);
+	return host___xstat64(0, pathname, buf);
+}
+
+int stat64(const char *pathname, struct stat *buf)
 {
 	CHECK_HOST_CALL(__xstat64);
 	return host___xstat64(0, pathname, buf);
@@ -615,5 +633,4 @@ int pipe(int fd[2])
 		return host_calls[__lkl__NR_pipe2]((long)fd, 0, 0, 0, 0, 0);
 
 	return pipe2(fd, 0);
-
 }

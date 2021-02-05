@@ -168,7 +168,13 @@ static void dpdkio_fill_slot_tx_offload(struct sk_buff *skb,
 		slot->ip_protocol = IPPROTO_TCP;
 		tcp = (struct tcphdr *)l4;
 		l5 = l4 + (tcp->doff << 2);
-		slot->tso_segsz = skb->len;
+
+		/* XXX: we need to negotiate offload between kernel and dpdk */
+		if (skb_shinfo(skb)->gso_size)
+			slot->tso_segsz = skb_shinfo(skb)->gso_size;
+		else
+			slot->tso_segsz = skb->len;
+
 		pr_info("tcp\n");
 		break;
 
@@ -232,11 +238,10 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 		skb_shinfo(skb)->gso_size, skb_shinfo(skb)->gso_type);
 
 	slot = dpdkio_get_free_tx_slot(dpdk);
-	slot = &dpdk->txslots[dpdk->txhead];
-	if (READ_ONCE(slot->skb)) {
+	if (!slot) {
 		/* slot is not released yet */
 		panic("tx slot is full\n");
-		dev->stats.tx_dropped++;
+		//dev->stats.tx_dropped++;
 		return NETDEV_TX_BUSY;
 	}
 
@@ -291,6 +296,7 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 
 	dev->stats.tx_packets++;
 	dev->stats.tx_bytes += pkt_len;
+	pr_info("tx pkt cnt %lu\n", dev->stats.tx_packets);
 
 
 	dpdkio_debug_slot(slot, "tx");

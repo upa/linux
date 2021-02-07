@@ -13,6 +13,34 @@
 #include <uapi/asm/dpdkio.h>
 
 
+/* XXX* shoud be a list */
+#define MAX_DPDK_PORTS	16
+static int dpdk_ports[MAX_DPDK_PORTS];	/* dpdk ports */
+static int dpdk_nports;
+
+static int __init dpdkio_append_dpdk_port(char *str)
+{
+	long port;
+	int ret;
+
+	if (dpdk_nports >= MAX_DPDK_PORTS) {
+		pr_err("too many dpdk ports (> %d)\n", dpdk_nports);
+		return -EINVAL;
+	}
+
+	pr_info("add dpdk port %s\n", str);
+	ret = kstrtol(str, 00, &port);
+	if (ret) {
+		pr_err("failed to add dpdk port %s: %ld\n", str, port);
+		return -EINVAL;
+	}
+
+	dpdk_ports[dpdk_nports++] = port;
+	return 0;
+}
+early_param("lkl_dpdkio", dpdkio_append_dpdk_port);
+
+
 static struct list_head dpdkio_list;	/* struct dpdkio_dev */
 
 /* dpdkio device */
@@ -615,7 +643,7 @@ static void dpdkio_kfree_skb(void *skb)
 
 static int __init dpdkio_init(void)
 {
-	int ret;
+	int n, ret = 0;
 
 	if (!lkl_ops->dpdkio_ops)
 		return 0;
@@ -625,9 +653,13 @@ static int __init dpdkio_init(void)
 	dpdkio_prepare();
 	lkl_ops->dpdkio_ops->free_skb = dpdkio_kfree_skb;
 
-	ret = dpdkio_init_dev(2); /* XXX: first port for the time being */
-	if (ret < 0)
-		return ret;
+	for (n = 0; n < dpdk_nports; n++) {
+		ret = dpdkio_init_dev(dpdk_ports[n]);
+		if (ret < 0) {
+			pr_err("failed to init dpdk port %d\n", dpdk_ports[n]);
+			return ret;
+		}
+	}
 
 	pr_info("lkl dpdkio init done\n");
 

@@ -55,5 +55,6 @@ struct lkl_dpdkio_slot {
 
 /* tools/lkl/lib/dpdkio.c */
 int lkl_dpdkio_init(int argc, char **argv);
+int lkl_dpdkio_exit(void);
 
 #endif

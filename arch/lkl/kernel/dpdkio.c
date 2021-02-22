@@ -14,7 +14,7 @@
 
 
 /* XXX* shoud be a list */
-#define MAX_DPDK_PORTS	16
+#define MAX_DPDK_PORTS	4
 static int dpdk_ports[MAX_DPDK_PORTS];	/* dpdk ports */
 static int dpdk_nports;
 
@@ -65,6 +65,13 @@ struct dpdkio_dev {
 	 * is not NULL), it means slot is full, wait.
 	 */
 
+	/* tx */
+#define DPDKIO_TX_MAX_BATCH	16
+	uint8_t 		slot_batch_count; /* # of pkts on tx batch */
+	struct lkl_dpdkio_slot *slot_batch[DPDKIO_TX_MAX_BATCH + 1];
+	/* batch of packet slots to be transmitted */
+
+	/* rx */
 	int			irq;		/* rx interrupt number */
 	int			irq_ack_fd;	/* eventfd for ack irq */
 	struct napi_struct	napi;
@@ -242,6 +249,7 @@ static struct lkl_dpdkio_slot *dpdkio_get_free_tx_slot(struct dpdkio_dev *dpdk)
 static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 				     struct net_device *dev)
 {
+	struct netdev_queue *txq = skb_get_tx_queue(dev, skb);
 	struct dpdkio_dev *dpdk = netdev_priv(dev);
 	struct skb_frag_struct *frag;
 	struct lkl_dpdkio_slot *slot;
@@ -261,7 +269,7 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 		return NETDEV_TX_BUSY;
 	}
 
-	/* let's fill the slot slot */
+	/* let's fill the slot */
 	pkt_len = skb->len;
 	slot->pkt_len = skb->len;
 	slot->nsegs = skb_shinfo(skb)->nr_frags + 1;
@@ -300,19 +308,30 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 	/* set skb to slot to free skb when mbuf is released */
 	slot->skb = skb;
 
-	/* XXX: pass the slot slot to dpdk backend. we need to batch
-	 * packets. How to handle that? check enqueued packets in
-	 * qdisc? or check xmit_more?
-	 */
-	ret = lkl_ops->dpdkio_ops->tx(dpdk->portid, slot, 1);
-	if (unlikely(ret == 0)) {
-		net_err_ratelimited("dpdkio tx failed\n");
-		dev->stats.tx_carrier_errors++;
+	/* batch the tx packets*/
+	/* append this packet to the end of batch */
+	dpdk->slot_batch[dpdk->slot_batch_count] = slot;
+	dpdk->slot_batch_count++;
+
+
+	/* xmit batched packets */
+
+	if (dpdk->slot_batch_count >= DPDKIO_TX_MAX_BATCH ||
+	    netif_xmit_stopped(txq) || !netdev_xmit_more()) {
+		ret = lkl_ops->dpdkio_ops->tx(dpdk->portid,
+					      dpdk->slot_batch,
+					      dpdk->slot_batch_count);
+		if (unlikely(ret == 0)) {
+			net_err_ratelimited("dpdkio tx failed\n");
+			dev->stats.tx_carrier_errors += dpdk->slot_batch_count;
+		}
+
+		dpdk->slot_batch_count = 0;
 	}
+
 
 	dev->stats.tx_packets++;
 	dev->stats.tx_bytes += pkt_len;
-
 
 	return NETDEV_TX_OK;
 

@@ -58,7 +58,7 @@ struct lkl_dpdkio_ops {
 
 	/* TX path */
 
-	int (*tx)(int portid, struct lkl_dpdkio_slot *slots, int nb_pkts);
+	int (*tx)(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts);
 	/* transmit upto `nb_pkts` packets in `pkts` array to a
 	 * underlaying ethernet device. It returns number of packets
 	 * transmitted. */

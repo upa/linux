@@ -9,6 +9,11 @@ int lkl_dpdkio_init(int argc, char **argv)
 	return 0;
 }
 
+int lkl_dpdkio_exit(void)
+{
+	return 0;
+}
+
 #else
 
 #include <stdlib.h>
@@ -56,7 +61,10 @@ int lkl_dpdkio_init(int argc, char **argv)
 	return 0;
 }
 
-
+int lkl_dpdkio_exit(void)
+{
+	return rte_eal_cleanup();
+}
 
 #define DPDKIO_MEM_NAME_MAX	32
 
@@ -467,7 +475,7 @@ static void dpdkio_rx_poll_thread(void *arg)
 		if (0 < nb_rx)
 			wait = 0;
 		else if (nb_rx == 0)
-			wait = ((wait + 1) & 0xFF) | 0x01;
+			wait = ((wait + 1) & 0x0F);
 		else {
 			pr_err("rte_eth_rx_queue_count: %s\n",
 			       strerror(-1 * nb_rx));
@@ -732,7 +740,7 @@ static void dpdkio_fill_mbuf_tx_offload(struct lkl_dpdkio_slot *slot,
 	}
 }
 
-static int dpdkio_tx(int portid, struct lkl_dpdkio_slot *slots, int nb_pkts)
+static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 {
 	struct dpdkio_port *port = dpdkio_port_get(portid);
 	struct rte_mbuf *mbufs[LKL_DPDKIO_MAX_BURST], *head;
@@ -743,7 +751,7 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot *slots, int nb_pkts)
 
 	nsegs = 0;
 	for (n = 0; n < nb_pkts; n++) {
-		slot = &slots[n];
+		slot = slots[n];
 		nsegs += slot->nsegs;
 	}
 
@@ -761,7 +769,7 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot *slots, int nb_pkts)
 	mbufs_tx_cnt = 0;
 	for (n = 0; n < nb_pkts; n++) {
 
-		slot = &slots[n];
+		slot = slots[n];
 
 #ifdef DEBUG_PCAP
 		/* pcap debugg!!  */

@@ -50,8 +50,6 @@ struct dpdkio_dev {
 	int			portid;	/* dpdk port id */
 	struct net_device	*dev;	/* netdevice */
 
-	void	*rx_mem_region;	/* mempool region for rx */
-
 	struct lkl_dpdkio_slot	txslots[LKL_DPDKIO_SLOT_NUM];
 	struct lkl_dpdkio_slot	rxslots[LKL_DPDKIO_SLOT_NUM];
 	uint32_t		txhead;
@@ -588,8 +586,10 @@ static int dpdkio_init_netdev(struct net_device *dev)
 
 static int dpdkio_init_dev(int port)
 {
+
 	struct dpdkio_dev *dpdk;
 	struct net_device *dev;
+	size_t rx_mem_size;
 	int nb_rxd, nb_txd;
 	int ret = 0;
 
@@ -610,46 +610,50 @@ static int dpdkio_init_dev(int port)
 		goto free_dpdkio;
 	}
 
-	/* prepare rx pool */
-	dpdk->rx_mem_region = kmalloc(LKL_DPDKIO_MEMPOOL_SIZE, GFP_KERNEL);
-	if (!dpdk->rx_mem_region) {
-		pr_err("failed to allocate memory for rx mempool %d-byte\n",
-		       LKL_DPDKIO_MEMPOOL_SIZE);
-		ret = -ENOMEM;
-		goto free_dpdkio;
-	}
-	memset(dpdk->rx_mem_region, 0, LKL_DPDKIO_MEMPOOL_SIZE);
+	/* prepare memory region for receiving packets */
+	for (rx_mem_size = 0; rx_mem_size < LKL_DPDKIO_RX_MEMPOOL_SIZE;) {
+		size_t size = MAX_ORDER_NR_PAGES * PAGE_SIZE;
+		void *mem = kmalloc(size, GFP_KERNEL);
 
-	ret = lkl_ops->dpdkio_ops->init_rxring(dpdk->portid,
-					       (uintptr_t)dpdk->rx_mem_region,
-					       LKL_DPDKIO_MEMPOOL_SIZE,
+		if (!mem) {
+			pr_err("failed to alloc %lu-bytes for rx mem region\n",
+			       size);
+			goto free_dpdkio;
+		}
+
+		ret = lkl_ops->dpdkio_ops->add_rx_region(dpdk->portid,
+							 (uintptr_t)mem, size);
+		if (ret) {
+			pr_err("failed to add rx mem region\n");
+			goto free_dpdkio;
+		}
+
+		rx_mem_size += size;
+	}
+
+	ret = lkl_ops->dpdkio_ops->init_rx_irq(dpdk->portid,
 					       &dpdk->irq,
 					       &dpdk->irq_ack_fd);
-	if (ret < 0)
-		goto free_rx_mem_region;
 
-	nb_rxd = LKL_DPDKIO_SLOT_NUM;
-	nb_txd = LKL_DPDKIO_SLOT_NUM;
+	nb_rxd = LKL_DPDKIO_SLOT_NUM << 2;
+	nb_txd = LKL_DPDKIO_SLOT_NUM << 2;
 	ret = lkl_ops->dpdkio_ops->setup(dpdk->portid, &nb_rxd, &nb_txd);
 	if (ret < 0)
-		goto free_rx_mem_region;
+		goto free_dpdkio;
 
 	ret = dpdkio_init_netdev(dev);
 	if (ret < 0)
-		goto free_rx_mem_region;
+		goto free_dpdkio;
 
 	/* init rx irq */
 	ret = request_irq(dpdk->irq, dpdkio_handle_irq, 0, netdev_name(dev),
 			  dpdk);
 
-	pr_info("netdev %s nb_rxd=%d nb_txd=%d rxpool 0x%lx irq=%d loaded\n",
-		netdev_name(dev), nb_txd, nb_rxd,
-		(uintptr_t)dpdk->rx_mem_region, dpdk->irq);
+	pr_info("netdev %s nb_rxd=%d nb_txd=%d irq=%d loaded\n",
+		netdev_name(dev), nb_txd, nb_rxd, dpdk->irq);
 
 	return ret;
 
-free_rx_mem_region:
-	kfree(dpdk->rx_mem_region);
 free_dpdkio:
 	kfree(dpdk);
 	return ret;

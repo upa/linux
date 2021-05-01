@@ -43,14 +43,15 @@ struct lkl_dpdkio_slot {
 
 #define LKL_DPDKIO_SLOT_NUM		512	/* must be power of 2*/
 #define LKL_DPDKIO_SLOT_MASK		(LKL_DPDKIO_SLOT_NUM - 1)
+/* Note that a lkl_dpdkio_slot represents a packet including multiple
+ * segments. Thus, the numbers of mbufs on tx/rx mempool must be
+ * larger than LKL_DPDKIO_SLOT_NUM, for exmaple,
+ (LKL_DPDKIO_SLOT_NUM x LKL_DPDKIO_MAX_SEGS). */
 
-#define LKL_DPDKIO_MEMPOOL_SURPLUS	512
 
-#define LKL_DPDKIO_MEMPOOL_PAGE_NUM	\
-	(LKL_DPDKIO_SLOT_NUM + LKL_DPDKIO_MEMPOOL_SURPLUS)
+//#define LKL_DPDKIO_RX_MEMPOOL_SIZE	(4 * 1024 * 1024) /* 4MB */
+#define LKL_DPDKIO_RX_MEMPOOL_SIZE	(96 * 1024 * 1024) /* 96MB */
 
-#define LKL_DPDKIO_MEMPOOL_SIZE	\
-	(LKL_DPDKIO_PAGE_SIZE * LKL_DPDKIO_MEMPOOL_PAGE_NUM)
 
 
 /* tools/lkl/lib/dpdkio.c */

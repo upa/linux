@@ -31,7 +31,6 @@ int lkl_dpdkio_exit(void)
 #include <rte_ethdev.h>
 #include <rte_cycles.h>
 
-
 #define pr_info(fmt, ...) fprintf(stdout, "%s(): " fmt,	 \
 				  __func__, ##__VA_ARGS__)
 
@@ -720,10 +719,10 @@ static void dpdkio_fill_mbuf_tx_offload(struct lkl_dpdkio_slot *slot,
 {
 	switch (ntohs(slot->eth_protocol)) {
 	case ETH_P_IP:
-		mbuf->ol_flags = (PKT_TX_IPV4 | PKT_TX_IP_CKSUM);
+		mbuf->ol_flags |= (PKT_TX_IPV4 | PKT_TX_IP_CKSUM);
 		break;
 	case ETH_P_IPV6:
-		mbuf->ol_flags = PKT_TX_IPV6;
+		mbuf->ol_flags |=  PKT_TX_IPV6;
 		break;
 	}
 
@@ -812,6 +811,7 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 		}
 
 		dpdkio_fill_mbuf_tx_offload(slot, mbufs_tx[mbufs_tx_cnt]);
+		//rte_pktmbuf_dump(stdout, mbufs_tx[mbufs_tx_cnt], 16);
 
 		mbufs_tx_cnt++;
 	}

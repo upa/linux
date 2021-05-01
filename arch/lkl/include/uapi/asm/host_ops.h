@@ -64,13 +64,14 @@ struct lkl_dpdkio_ops {
 
 	int (*init_port)(int portid);	/* initialize a dpdkio port */
 
-	int (*init_rxring)(int portid, unsigned long addr, int size,
-			   int *irq, int *irq_ack_fd);
-	/* pass a buffer region inside the bootmem and its
-	 * size. dpdkio_init_rxing creates a heap on the region,
-	 * creates mempool on the heap, and set it as rx mempool for a
-	 * underlaying ethernet device. irq number associating the rx
-	 * is returned through `irq`. */
+	int (*add_rx_region)(int portid, unsigned long addr, int size);
+	/* pass a buffer region inside the bootmem and its size. the
+	 * region is added to the dpdk heap used for pktmbuf pool for
+	 * rx. */
+
+	int (*init_rx_irq)(int portid, int *irq, int *irq_ack_fd);
+	/* an irq number and its eventfd associating the rx on this
+	 * port are passed through `*irq` and `*iqr_ack_fd` */
 
 	int (*setup)(int portid, int *nb_rx_desc, int *nb_tx_desc);
 	/* setup a dpdkio device */

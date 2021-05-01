@@ -250,7 +250,7 @@ static int dpdkio_add_rx_region(int portid, unsigned long addr, int size)
 	rte_iova_t iova[nr_pages], iova_rx;
 	int n, ret;
 
-	pr_info("%s: add %lu-byte, %d pages\n", __func__, size, nr_pages);
+	pr_info("add %u-byte, %d pages\n", size, nr_pages);
 
 	/* prepare 4k-byte-aligned iova array */
 	iova_rx = port->iova_start + (addr - lkl_host_ops.memory_start);
@@ -359,8 +359,7 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 	/* tx mbuf can be small because packet payload is allocated
 	 * along with sk_buff. It is attached as extmem. */
 	port->tx_mempool = rte_pktmbuf_pool_create(port->tx_mempool_name,
-						   nb_txd,
-						   256,
+						   nb_txd << 1, 512,
 						   0, 64,
 						   rte_socket_id());
 	if (!port->tx_mempool) {
@@ -394,8 +393,7 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 	 * dpdk RX is stuck because there are no mbufs on the pool.
 	 */
 	port->rx_mempool = rte_pktmbuf_pool_create(port->rx_mempool_name,
-						   nb_rxd,
-						   256,
+						   nb_rxd << 1, 512,
 						   0,
 						   4096,
 						   sock_id);

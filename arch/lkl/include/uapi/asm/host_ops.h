@@ -23,13 +23,13 @@ struct lkl_dpdkio_ops {
 
 	int (*init_port)(int portid);	/* initialize a dpdkio port */
 
-	int (*init_rxring)(int portid, unsigned long addr, int size,
-			   int *irq, int *irq_ack_fd);
-	/* pass a buffer region inside the bootmem and its
-	 * size. dpdkio_init_rxing creates a heap on the region,
-	 * creates mempool on the heap, and set it as rx mempool for a
-	 * underlaying ethernet device. irq number associating the rx
-	 * is returned through `irq`. */
+	int (*init_rx_irq)(int portid, int *irq, int *irq_ack_fd);
+	/* irq number associating the rx is returned through `irq`. */
+
+	int (*add_rx_region)(int portid, unsigned long addr, int size);
+	/* pass a buffer region inside the bootmem and its size. the
+	 * buffer region is added to heap where rx pktmbuf pool will
+	 * be created. */
 
 	int (*setup)(int portid, int *nb_rx_desc, int *nb_tx_desc);
 	/* setup a dpdkio device */

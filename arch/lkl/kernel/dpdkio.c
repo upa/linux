@@ -590,6 +590,7 @@ static int dpdkio_init_dev(int port)
 {
 	struct dpdkio_dev *dpdk;
 	struct net_device *dev;
+	size_t rx_mem_size;
 	int nb_rxd, nb_txd;
 	int ret = 0;
 
@@ -610,21 +611,33 @@ static int dpdkio_init_dev(int port)
 		goto free_dpdkio;
 	}
 
-	/* prepare rx pool */
-	dpdk->rx_mem_region = kmalloc(LKL_DPDKIO_MEMPOOL_SIZE, GFP_KERNEL);
-	if (!dpdk->rx_mem_region) {
-		pr_err("failed to allocate memory for rx mempool %d-byte\n",
-		       LKL_DPDKIO_MEMPOOL_SIZE);
-		ret = -ENOMEM;
-		goto free_dpdkio;
-	}
-	memset(dpdk->rx_mem_region, 0, LKL_DPDKIO_MEMPOOL_SIZE);
+	/* prepare heap for rx */
+	for (rx_mem_size = 0; rx_mem_size < LKL_DPDKIO_RX_MEMPOOL_SIZE;) {
+		size_t size = MAX_ORDER_NR_PAGES * PAGE_SIZE;
+		void *mem = kmalloc(size, GFP_KERNEL);
 
-	ret = lkl_ops->dpdkio_ops->init_rxring(dpdk->portid,
-					       (uintptr_t)dpdk->rx_mem_region,
-					       LKL_DPDKIO_MEMPOOL_SIZE,
+		if (!mem) {
+			pr_err("failed to alloc %lu-bytes for rx mem region\n",
+			       size);
+			goto free_dpdkio;
+		}
+
+		memset(mem, 0, size);
+		ret = lkl_ops->dpdkio_ops->add_rx_region(dpdk->portid,
+							 (uintptr_t)mem, size);
+		if (ret) {
+			pr_err("failed to add rx mem region\n");
+			goto free_dpdkio;
+		}
+
+		rx_mem_size += size;
+	}
+
+	/* init rx irq */
+	ret = lkl_ops->dpdkio_ops->init_rx_irq(dpdk->portid,
 					       &dpdk->irq,
 					       &dpdk->irq_ack_fd);
+
 	if (ret < 0)
 		goto free_rx_mem_region;
 

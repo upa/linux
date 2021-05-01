@@ -52,6 +52,7 @@ struct lkl_dpdkio_slot {
 #define LKL_DPDKIO_MEMPOOL_SIZE	\
 	(LKL_DPDKIO_PAGE_SIZE * LKL_DPDKIO_MEMPOOL_PAGE_NUM)
 
+#define LKL_DPDKIO_RX_MEMPOOL_SIZE	(16 * 1024 * 1024)
 
 /* tools/lkl/lib/dpdkio.c */
 int lkl_dpdkio_init(int argc, char **argv);

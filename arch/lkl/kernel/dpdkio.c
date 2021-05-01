@@ -657,6 +657,10 @@ free_dpdkio:
 
 static void dpdkio_kfree_skb(void *skb)
 {
+	if (!skb) {
+		pr_err("%s: null skb!\n", __func__);
+		return;
+	}
 	kfree_skb((struct sk_buff *)skb);
 }
 

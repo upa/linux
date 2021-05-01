@@ -200,6 +200,7 @@ static void dpdkio_free(void *addr)
 static int dpdkio_init_port(int portid)
 {
 	struct dpdkio_port *port;
+	rte_iova_t iova_start;
 	int ret;
 
 	if (portid >= DPDKIO_PORT_MAX) {
@@ -223,25 +224,14 @@ static int dpdkio_init_port(int portid)
 	snprintf(port->tx_mempool_name, DPDKIO_MEM_NAME_MAX,
 		 "txpool-%d", portid);
 
-	/* create heap  for rx */
+	/* create heap for rx */
 	ret = rte_malloc_heap_create(port->rx_heap_name);
 	if (ret < 0) {
 		pr_err("failed to create rx heap: %s\n", strerror(rte_errno));
 		return -1 * rte_errno;
 	}
 
-	return 0;
-}
-
-static int dpdkio_add_rx_region(int portid, unsigned long addr, int size)
-{
-	struct dpdkio_port *port = dpdkio_port_get(portid);
-	int nr_pages = size / LKL_DPDKIO_PAGE_SIZE; /* XXX: should validate */
-	rte_iova_t iova_start, iova_rx;
-	rte_iova_t iova[nr_pages];
-	int n, ret;
-
-	/* verify iova of the lkl boot memory */
+	/* save the iova of the lkl boot memory */
 	iova_start = rte_malloc_virt2iova((void *)(lkl_host_ops.memory_start));
 	if (iova_start == RTE_BAD_IOVA) {
 		pr_err("failed to get iova of memory_start 0x%lx\n",
@@ -250,15 +240,27 @@ static int dpdkio_add_rx_region(int portid, unsigned long addr, int size)
 	}
 	port->iova_start = iova_start;	/* save the start of iova */
 
+	return 0;
+}
+
+static int dpdkio_add_rx_region(int portid, unsigned long addr, int size)
+{
+	struct dpdkio_port *port = dpdkio_port_get(portid);
+	int nr_pages = size / LKL_DPDKIO_PAGE_SIZE; /* XXX: should validate */
+	rte_iova_t iova[nr_pages], iova_rx;
+	int n, ret;
+
+	pr_info("%s: add %lu-byte, %d pages\n", __func__, size, nr_pages);
+
 	/* prepare 4k-byte-aligned iova array */
-	iova_rx = iova_start + (addr - lkl_host_ops.memory_start);
-	for (n = 0; n < (size / LKL_DPDKIO_PAGE_SIZE); n++)
+	iova_rx = port->iova_start + (addr - lkl_host_ops.memory_start);
+	for (n = 0; n < nr_pages; n++)
 		iova[n] = iova_rx + (LKL_DPDKIO_PAGE_SIZE * n);
 
 	/* add this region to the the heap for rx mbuf */
 	ret = rte_malloc_heap_memory_add(port->rx_heap_name,
-					 (void *)addr, size, iova,
-					 nr_pages, LKL_DPDKIO_PAGE_SIZE);
+					 (void *)addr, size, iova, nr_pages,
+					 LKL_DPDKIO_PAGE_SIZE);
 	if (ret < 0) {
 		pr_err("failed to add rx memory regtion to rte heap: %s\n",
 		       strerror(rte_errno));
@@ -357,7 +359,9 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 	/* tx mbuf can be small because packet payload is allocated
 	 * along with sk_buff. It is attached as extmem. */
 	port->tx_mempool = rte_pktmbuf_pool_create(port->tx_mempool_name,
-						   nb_txd, nb_txd >> 2, 0, 64,
+						   nb_txd,
+						   256,
+						   0, 64,
 						   rte_socket_id());
 	if (!port->tx_mempool) {
 		pr_err("faield to create tx mbuf pool %s: %s\n",
@@ -383,16 +387,17 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 		return -ENOENT;
 	}
 
-	/* Note, create largeer number of mbufs than
+	/* Note, create larger number of mbufs than
 	 * LKL_DPDKIO_SLOT_NUM. dpdkio driver releases an RXed buffer
-	 * with mbuf * when recycle the buffer. So, if the number of
-	 * slots and the * number of mbufs on the rx pool are
-	 * identical, dpdk RX is * stuck because there are no mbufs on
-	 * the pool. So, we * allocate LKL_DPDKIO_SLOT_NUM + 64 mbufs.
+	 * with mbuf when recycle the buffer. So, if the number of
+	 * slots and the number of mbufs on the rx pool are identical,
+	 * dpdk RX is stuck because there are no mbufs on the pool.
 	 */
 	port->rx_mempool = rte_pktmbuf_pool_create(port->rx_mempool_name,
-						   nb_rxd, nb_rxd >> 2, 0,
-						   RTE_MBUF_DEFAULT_DATAROOM,
+						   nb_rxd,
+						   256,
+						   0,
+						   4096,
 						   sock_id);
 	if (!port->rx_mempool) {
 		pr_err("failed to create rx mempool %s "
@@ -401,7 +406,6 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 		       sock_id, strerror(rte_errno));
 		return -1 * rte_errno;
 	}
-
 
 	/* XXX: RX offload setting here */
 	ret = rte_eth_rx_queue_setup(portid, 0, nb_rxd, SOCKET_ID_ANY,
@@ -805,7 +809,7 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 		}
 
 		dpdkio_fill_mbuf_tx_offload(slot, mbufs_tx[mbufs_tx_cnt]);
-		//rte_pktmbuf_dump(stdout, mbufs_tx[mbufs_tx_cnt], 16);
+		//rte_pktmbuf_dump(stdout, mbufs_tx[mbufs_tx_cnt], 0);
 
 		mbufs_tx_cnt++;
 	}

@@ -621,6 +621,7 @@ static int dpdkio_init_dev(int port)
 			goto free_dpdkio;
 		}
 
+		memset(mem, 0, size);
 		ret = lkl_ops->dpdkio_ops->add_rx_region(dpdk->portid,
 							 (uintptr_t)mem, size);
 		if (ret) {
@@ -635,8 +636,8 @@ static int dpdkio_init_dev(int port)
 					       &dpdk->irq,
 					       &dpdk->irq_ack_fd);
 
-	nb_rxd = LKL_DPDKIO_SLOT_NUM << 2;
-	nb_txd = LKL_DPDKIO_SLOT_NUM << 2;
+	nb_rxd = LKL_DPDKIO_DESC_NUM;
+	nb_txd = LKL_DPDKIO_DESC_NUM;
 	ret = lkl_ops->dpdkio_ops->setup(dpdk->portid, &nb_rxd, &nb_txd);
 	if (ret < 0)
 		goto free_dpdkio;

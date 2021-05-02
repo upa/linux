@@ -390,17 +390,24 @@ struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
 	uint32_t truesize;
 	int n;
 
+#if 0
+	pr_info("dump recv slot\n");
+	for (n = 0; n < slot->nsegs; n++) {
+		pr_info(" - [%d] data=0x%lx len=%lu\n", n,
+			(uintptr_t)slot->segs[n].iov_base,
+			slot->segs[n].iov_len);
+	}
+#endif
+
 	/* build an skb to around the first segment
 	 * XXX: really there is tail room for shared_info?
 	 */
 	truesize = (SKB_DATA_ALIGN(slot->segs[0].iov_len) +
 		    SKB_DATA_ALIGN(sizeof(struct skb_shared_info)));
 
-
 	skb = build_skb(slot->segs[0].iov_base, truesize);
 	if (!skb)
 		return NULL;
-
 
 	__skb_put(skb, slot->segs[0].iov_len);
 
@@ -420,9 +427,8 @@ struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
 		 * phys_to_virt. */
 		page = virt_to_page(phys_to_virt(phy_addr));
 		offset = phys_to_virt(phy_addr) - page_address(page);
-
 		skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, page,
-				offset, seg->iov_len, seg->iov_len);
+				offset, seg->iov_len, LKL_DPDKIO_PAGE_SIZE);
 	}
 
 	dpdkio_rx_cksum(dpdk, slot, skb);
@@ -437,9 +443,6 @@ struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
 		skb_shinfo(skb)->gso_size = slot->tso_segsz;
 		skb_shinfo(skb)->gso_type = gso_type;
 
-		/* XXX: copied from virtio_net_hdr_to_skb() */
-		skb_shinfo(skb)->gso_type |= SKB_GSO_DODGY;
-		skb_shinfo(skb)->gso_segs = 0;
 	}
 
 	skb->protocol = eth_type_trans(skb, dpdk->dev);
@@ -466,7 +469,7 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 		slot = &dpdk->rxslots[head];
 		if (dpdkio_recycle_rx_slot(slot)) {
 			slots[i++] = slot;
-			if (i > b)
+			if (i >= b)
 				break;
 		}
 
@@ -547,17 +550,12 @@ static int dpdkio_init_netdev(struct net_device *dev)
 
 	snprintf(dev->name, sizeof(dev->name), "dpdkio%d", dpdk->portid);
 
-#if 1
 	dev->features = (NETIF_F_SG |
 			 NETIF_F_TSO |
 			 NETIF_F_TSO6 |
 			 NETIF_F_HW_CSUM |
-			 NETIF_F_RXCSUM);
-#else
-	dev->features = (NETIF_F_HW_CSUM |
-			 NETIF_F_RXCSUM);
-#endif
-	/* XXX: we needs NETIF_F_LRO */
+			 NETIF_F_RXCSUM |
+			 NETIF_F_LRO);
 	dev->hw_features = dev->features;
 
 	dev->min_mtu = ETH_MIN_MTU;

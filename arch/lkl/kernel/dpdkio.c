@@ -230,7 +230,7 @@ static struct lkl_dpdkio_slot *dpdkio_get_free_tx_slot(struct dpdkio_dev *dpdk)
 
 	do {
 		s = &dpdk->txslots[txhead];
-		if (!s->skb) {
+		if (READ_ONCE(s->skb) == NULL) {
 			slot = s;
 			break;
 		}
@@ -351,7 +351,7 @@ static bool dpdkio_recycle_rx_slot(struct lkl_dpdkio_slot *slot)
 	if (refcount_read(&skb->users) == 1) {
 		/* skb is attached, but it is already consumed. relelase
 		 * skb and associating mbuf */
-		kfree_skb(skb);
+		consume_skb(skb);
 		slot->skb = NULL;
 
 		if (slot->mbuf) {

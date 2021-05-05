@@ -125,10 +125,22 @@ static int config_load(void)
 	return ret;
 }
 
+#if 0
 static char *ealargs[] = {
 	"-c", "1",
-	"-n", "1",
+	"-n", "2",
+	"--log-level", "*:debug",
 };
+#else
+static char *ealargs[] = {
+	"-c", "1",
+	"-n", "2",
+	"-a",
+	"09:00.0,rx_vec_en=0,mprq_en=0,rxq_cqe_comp_en=0,tx_vec_en=0,"
+	"txq_mpw_en=0,rxq_cqe_comp_en=0,dv_xmeta_en=0",
+	"--log-level", "*:debug",
+};
+#endif
 
 void __attribute__((constructor))
 hijack_init(void)

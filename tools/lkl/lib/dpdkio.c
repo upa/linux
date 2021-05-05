@@ -485,7 +485,7 @@ static void dpdkio_rx_poll_thread(void *arg)
 		if (0 < nb_rx)
 			wait = 0;
 		else if (nb_rx == 0)
-			wait = ((wait + 1) & 0x0F);
+			wait = (((wait + 1) & 0x0F) | 0x01);
 		else {
 			pr_err("rte_eth_rx_queue_count: %s\n",
 			       strerror(-1 * nb_rx));
@@ -674,11 +674,11 @@ static int dpdkio_rx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 	nb_rx = rte_eth_rx_burst(portid, 0, mbufs, nb_pkts);
 
 	for (i = 0, n = 0; n < nb_rx; n++) {
+		//rte_pktmbuf_dump(stdout, mbufs[n], 0);
 		ret = dpdkio_rx_mbuf_to_slot(portid, mbufs[n], slots[i]);
 		if (unlikely(ret < 0))
 			continue; /* advance only mbuf index 'n', not 'i' */
 		i++;
-		//rte_pktmbuf_dump(stdout, mbufs[n], 0);
 	}
 
 	return i;

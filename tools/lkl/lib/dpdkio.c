@@ -344,7 +344,10 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 		return ret;
 	}
 
-	port_conf.txmode.offloads = dev_info.tx_offload_capa;
+	port_conf.txmode.offloads = (DEV_TX_OFFLOAD_IPV4_CKSUM |
+				     DEV_TX_OFFLOAD_UDP_CKSUM |
+				     DEV_TX_OFFLOAD_TCP_CKSUM |
+				     DEV_TX_OFFLOAD_TCP_TSO);
 	port_conf.txmode.mq_mode = ETH_MQ_TX_NONE;
 
 	port_conf.rxmode.offloads = (DEV_RX_OFFLOAD_CHECKSUM |
@@ -421,6 +424,11 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 		return -1 * rte_errno;
 	}
 
+	struct rte_eth_rxconf rxconf = dev_info.default_rxconf;
+	rxconf.rx_free_thresh = nb_rxd >> 1;
+	rxconf.rx_drop_en = 1;
+	rxconf.offloads = port_conf.rxmode.offloads;
+
 	ret = rte_eth_rx_queue_setup(portid, 0, nb_rxd, SOCKET_ID_ANY,
 				     NULL, port->rx_mempool);
 	if (ret < 0) {
@@ -429,9 +437,9 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 		return ret;
 	}
 
-
 	/* just debug */
 #ifdef DEBUG_PCAP
+	pr_warn("debug pcap capture enabled\n");
 	port->tx_pcap_fd = pcap_init_file("debug-tx.pcap");
 	port->rx_pcap_fd = pcap_init_file("debug-rx.pcap");
 #endif
@@ -718,12 +726,7 @@ static void dpdkio_extmem_free_cb(void *addr, void *opaque)
 static inline rte_iova_t dpdkio_seg_iova(struct dpdkio_port *port,
 					 struct lkl_iovec *seg)
 {
-	unsigned long iova;
-
-	iova = (port->iova_start +
-		((uintptr_t)seg->iov_base) - lkl_host_ops.memory_start);
-
-	return (rte_iova_t)iova;
+	return rte_mem_virt2iova(seg->iov_base);
 }
 
 static void dpdkio_fill_mbuf_tx_offload(struct lkl_dpdkio_slot *slot,

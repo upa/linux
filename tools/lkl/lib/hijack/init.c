@@ -125,11 +125,10 @@ static int config_load(void)
 	return ret;
 }
 
-#if 0
+#if 1
 static char *ealargs[] = {
 	"-c", "1",
-	"-n", "2",
-	"--log-level", "*:debug",
+	"-n", "1",
 };
 #else
 static char *ealargs[] = {

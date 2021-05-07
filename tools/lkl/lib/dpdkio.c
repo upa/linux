@@ -254,7 +254,7 @@ static int dpdkio_add_rx_region(int portid, unsigned long addr, int size)
 	page_size = sysconf(_SC_PAGESIZE);
 	nr_pages = size / page_size;
 
-	pr_info("add %u-byte, %d pages, 0x%lx iova 0x%lx\n",
+	pr_info("add %uB %d pages 0x%lx iova 0x%lx\n",
 		size, nr_pages, addr, rte_mem_virt2iova((void *)addr));
 
 	iovas = malloc(sizeof(*iovas) * nr_pages);

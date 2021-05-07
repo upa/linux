@@ -66,6 +66,7 @@ int lkl_dpdkio_exit(void)
 }
 
 #define DPDKIO_MEM_NAME_MAX	32
+#define DPDKIO_MAX_RX_REGIONS	72
 
 /* structure representing lkl dpdkio backend port */
 struct dpdkio_port {
@@ -74,8 +75,8 @@ struct dpdkio_port {
 	rte_iova_t	iova_start;	/* start iova of bootmem */
 
 	/* rx */
-	char		rx_heap_name[DPDKIO_MEM_NAME_MAX];
-	char		rx_mempool_name[DPDKIO_MEM_NAME_MAX];
+	struct lkl_iovec	rx_regions[DPDKIO_MAX_RX_REGIONS];
+	char			rx_mempool_name[DPDKIO_MEM_NAME_MAX];
 	struct rte_mempool	*rx_mempool;
 
 	int		irq;		/* rx interrupt number */
@@ -201,7 +202,6 @@ static int dpdkio_init_port(int portid)
 {
 	struct dpdkio_port *port;
 	rte_iova_t iova_start;
-	int ret;
 
 	if (portid >= DPDKIO_PORT_MAX) {
 		pr_err("too many dpdkio ports (%d > %d)\n",
@@ -216,20 +216,12 @@ static int dpdkio_init_port(int portid)
 	}
 
 	port = dpdkio_port_get(portid);
+	memset(port, 0, sizeof(*port));
 	port->portid = portid;
-	snprintf(port->rx_heap_name, DPDKIO_MEM_NAME_MAX,
-		 "rxheap-%d", portid);
 	snprintf(port->rx_mempool_name, DPDKIO_MEM_NAME_MAX,
 		 "rxpool-%d", portid);
 	snprintf(port->tx_mempool_name, DPDKIO_MEM_NAME_MAX,
 		 "txpool-%d", portid);
-
-	/* create heap for rx */
-	ret = rte_malloc_heap_create(port->rx_heap_name);
-	if (ret < 0) {
-		pr_err("failed to create rx heap: %s\n", strerror(rte_errno));
-		return -1 * rte_errno;
-	}
 
 	/* save the iova of the lkl boot memory */
 	iova_start = rte_malloc_virt2iova((void *)(lkl_host_ops.memory_start));
@@ -246,40 +238,101 @@ static int dpdkio_init_port(int portid)
 static int dpdkio_add_rx_region(int portid, unsigned long addr, int size)
 {
 	struct dpdkio_port *port = dpdkio_port_get(portid);
-	rte_iova_t *iovas;
-	size_t page_size;
-	int nr_pages;
-	int n, ret = 0;
+	int n;
 
-	page_size = sysconf(_SC_PAGESIZE);
-	nr_pages = size / page_size;
+	if (size <= 0) {
+		pr_err("invalid size %d\n", size);
+		return -EINVAL;
+	}
 
-	pr_info("add %uB %d pages 0x%lx iova 0x%lx\n",
-		size, nr_pages, addr, rte_mem_virt2iova((void *)addr));
+	for (n = 0; n < DPDKIO_MAX_RX_REGIONS; n++) {
+		struct lkl_iovec *reg = &port->rx_regions[n];
+		if (reg->iov_len == 0) {
+			reg->iov_base = (void *)addr;
+			reg->iov_len = size;
+			return 0;
+		}
+	}
 
-	iovas = malloc(sizeof(*iovas) * nr_pages);
-	if (!iovas) {
-		pr_err("failed to allocate memory for iova array: %s\n",
+	pr_err("no available slot for the rx region\n");
+	return -1;
+}
+
+/* mainly copied from dpdk/app/test-pmd/testpmd.c*/
+
+static int dpdkio_rx_region_to_extmem(int portid,
+				      int mbuf_size, struct lkl_iovec *reg,
+				      struct rte_pktmbuf_extmem **ext_mem)
+{
+	struct rte_pktmbuf_extmem *xmem;
+	int n, elt_num, elt_size;
+
+	/* I assume mbuf_size aligned to pagesz, so next line has no sense */
+	elt_size = RTE_ALIGN_CEIL(mbuf_size, RTE_CACHE_LINE_SIZE);
+	elt_num = reg->iov_len / elt_size;
+
+	xmem = malloc(sizeof(struct rte_pktmbuf_extmem) * elt_num);
+	if (!xmem) {
+		pr_err("failed to alloc rte_pktmbuf_extmem: %s",
 		       strerror(errno));
 		return -ENOMEM;
 	}
 
-	/* prepare 4k-byte-aligned iova array */
-	for (n = 0; n < nr_pages; n++)
-		iovas[n] = rte_mem_virt2iova(RTE_PTR_ADD(addr, n * page_size));
-
-	/* add this region to the the heap for rx mbuf */
-	ret = rte_malloc_heap_memory_add(port->rx_heap_name,
-					 (void *)addr, size, iovas,
-					 nr_pages, page_size);
-	if (ret < 0) {
-		pr_err("failed to add rx memory regtion to rte heap: %s\n",
-		       strerror(rte_errno));
-		ret = -1 * rte_errno;
+	for (n = 0; n < elt_num; n++) {
+		struct rte_pktmbuf_extmem *x = xmem + n;
+		void *addr = reg->iov_base + (elt_size * n);
+		x->buf_ptr = addr;
+		x->buf_iova = rte_mem_virt2iova(addr);
+		x->buf_len = elt_size;
+		x->elt_size = elt_size;
 	}
 
-	free(iovas);
-	return ret;
+	*ext_mem = xmem;
+	return n;
+}
+
+static int dpdkio_rx_regions_to_extmem(int portid, int mbuf_size,
+				       struct rte_pktmbuf_extmem **ext_mem)
+{
+	struct dpdkio_port *port = dpdkio_port_get(portid);
+	struct rte_pktmbuf_extmem *xmem = NULL;
+	int nr_extmem = 0, nr_extmem_new = 0;
+	size_t segs_size = 0, nr_segs = 0;
+	int n, i, ret;
+
+	for (n = 0; n < DPDKIO_MAX_RX_REGIONS; n++) {
+		struct lkl_iovec *reg = &port->rx_regions[n];
+		struct rte_pktmbuf_extmem *x;
+
+		if (reg->iov_len == 0)
+			break;
+		segs_size += reg->iov_len;
+		nr_segs++;
+
+		ret = dpdkio_rx_region_to_extmem(portid, mbuf_size, reg, &x);
+		if (ret < 0)
+			return -1;
+
+		nr_extmem_new = nr_extmem + ret;
+		xmem = realloc(xmem, sizeof(*xmem) * nr_extmem_new);
+		if (!xmem) {
+			pr_err("failed to alloc for extmem\n");
+			return -1;
+		}
+
+		for (i = 0; i < ret; i++)
+			xmem[nr_extmem + i] = x[i];
+		free(x); /* malloc()ed in dpdkio_rx_region_to_extmem */
+
+		nr_extmem = nr_extmem_new;
+	}
+
+	*ext_mem = xmem;
+
+	pr_info("%d extmem segs on %lu-byte %lu rx regions\n",
+		nr_extmem, segs_size, nr_segs);
+
+	return nr_extmem;
 }
 
 static int dpdkio_init_rx_irq(int portid, int *irq, int *irq_ack_fd)
@@ -310,7 +363,7 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 	struct rte_eth_dev_info dev_info;
 	uint16_t nb_txd = *nb_tx_desc;
 	uint16_t nb_rxd = *nb_rx_desc;
-	int ret, sock_id;
+	int ret;
 
 	if (*nb_tx_desc < 1 || *nb_rx_desc < 1) {
 		pr_err("invalid number of desc tx=%d rx=%d\n",
@@ -393,35 +446,24 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 	}
 
 	/*** RX ***/
-	sock_id = rte_malloc_heap_get_socket(port->rx_heap_name);
-	if (sock_id < 0) {
-		pr_err("rte heap %s not found\n", port->rx_heap_name);
-		return -ENOENT;
+	struct rte_pktmbuf_extmem *ext_mem;
+	int nr_extmem;
+	int mbuf_size = 1 << 12; /* must be 4k!! 2021/5/17 17:31 */
+
+	nr_extmem = dpdkio_rx_regions_to_extmem(portid, mbuf_size, &ext_mem);
+	if (nr_extmem < 0) {
+		pr_err("failed to prepare extmem on rx region\n");
+		return nr_extmem;
 	}
 
-	/* Note, create larger number of mbufs than
-	 * LKL_DPDKIO_SLOT_NUM. dpdkio driver releases an RXed buffer
-	 * with mbuf when recycle the buffer. So, if the number of
-	 * slots and the number of mbufs on the rx pool are identical,
-	 * dpdk RX is stucked because there are no mbufs on the
-	 * pool. And, the number of mbufs must be larger than the
-	 * number of rx descs.
-	 */
-	port->rx_mempool = rte_pktmbuf_pool_create(port->rx_mempool_name,
-						   nb_rxd << 1, 512, 0,
-						   1 << 15, sock_id);
-	/* XXX: when the number of segments of LRO packet exceeds 2,
-	 * something corruption occurs,, e.g, rx mbuf iova is invalid,
-	 * mbuf->mp invalid, invalid local address appears on
-	 * copy_to_user, etc... So, we use the max LRO packet size
-	 * (nearly 1 << 16), and 1 << 15 mbuf data length.
-	 */
+	port->rx_mempool = rte_pktmbuf_pool_create_extbuf
+		(port->rx_mempool_name, nb_rxd << 1, 512, 0, mbuf_size,
+		 rte_socket_id(), ext_mem, nr_extmem);
+
 	if (!port->rx_mempool) {
-		pr_err("failed to create rx mempool %s "
-		       "on %s (socket id %d): %s\n",
-		       port->rx_mempool_name, port->rx_heap_name,
-		       sock_id, strerror(rte_errno));
-		return -1 * rte_errno;
+		pr_err("faield to create rx mbuf pool %s: %s\n",
+		       port->rx_mempool_name, strerror(rte_errno));
+		return rte_errno * -1;
 	}
 
 	struct rte_eth_rxconf rxconf = dev_info.default_rxconf;
@@ -430,7 +472,7 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 	rxconf.offloads = port_conf.rxmode.offloads;
 
 	ret = rte_eth_rx_queue_setup(portid, 0, nb_rxd, SOCKET_ID_ANY,
-				     NULL, port->rx_mempool);
+				     &rxconf, port->rx_mempool);
 	if (ret < 0) {
 		pr_err("failed to setup rx queue port %d queue 0: %s\n",
 		       portid, strerror(ret * -1));
@@ -682,7 +724,8 @@ static int dpdkio_rx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 	nb_rx = rte_eth_rx_burst(portid, 0, mbufs, nb_pkts);
 
 	for (i = 0, n = 0; n < nb_rx; n++) {
-		//rte_pktmbuf_dump(stdout, mbufs[n], 0);
+		pr_info("\n==== RX ====\n");
+		rte_pktmbuf_dump(stdout, mbufs[n], 0);
 		ret = dpdkio_rx_mbuf_to_slot(portid, mbufs[n], slots[i]);
 		if (unlikely(ret < 0))
 			continue; /* advance only mbuf index 'n', not 'i' */
@@ -804,12 +847,28 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 			struct lkl_iovec *seg = &slot->segs[i];
 			struct rte_mbuf *mbuf = mbufs[mbufcnt++];
 
+
+			/* align to 4k-byte */
+#if 0
+			unsigned long offset, size;
+			offset = (uintptr_t)seg->iov_base & 0x0FFF;
+			size = seg->iov_len + offset;
+
+			rte_pktmbuf_attach_extbuf(mbuf,
+						  seg->iov_base - offset,
+						  dpdkio_seg_iova(port, seg),
+						  seg->iov_len + offset, shinfo);
+			mbuf->pkt_len = seg->iov_len;
+			mbuf->data_len = size;
+			mbuf->data_off = offset;
+#else
 			rte_pktmbuf_attach_extbuf(mbuf,
 						  seg->iov_base,
 						  dpdkio_seg_iova(port, seg),
 						  seg->iov_len, shinfo);
 			mbuf->pkt_len = seg->iov_len;
 			mbuf->data_len = seg->iov_len;
+#endif
 
 			if (head == NULL) {
 				/* the first mbuf of this packet */
@@ -826,7 +885,8 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 		}
 
 		dpdkio_fill_mbuf_tx_offload(slot, mbufs_tx[mbufs_tx_cnt]);
-		//rte_pktmbuf_dump(stdout, mbufs_tx[mbufs_tx_cnt], 0);
+		pr_info("\n==== TX ====\n");
+		rte_pktmbuf_dump(stdout, mbufs_tx[mbufs_tx_cnt], 0);
 
 		mbufs_tx_cnt++;
 	}

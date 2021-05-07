@@ -279,7 +279,7 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 
 	/* the first segment, usually header */
 	seg = &slot->segs[0];
-	seg->iov_base = skb->data;	/* yeah, we are in LKL, va == pa */
+	seg->iov_base = skb->data;
 	seg->iov_len = skb_headlen(skb);
 
 	/* append frags */
@@ -351,7 +351,7 @@ static bool dpdkio_recycle_rx_slot(struct lkl_dpdkio_slot *slot)
 	if (refcount_read(&skb->users) == 1) {
 		/* skb is attached, but it is already consumed. relelase
 		 * skb and associating mbuf */
-		consume_skb(skb);
+		kfree_skb(skb);
 		slot->skb = NULL;
 
 		if (slot->mbuf) {

@@ -51,7 +51,7 @@ struct lkl_dpdkio_slot {
 
 #define LKL_DPDKIO_DESC_NUM		1024
 //#define LKL_DPDKIO_RX_MEMPOOL_SIZE	(4 * 1024 * 1024) /* 4MB */
-#define LKL_DPDKIO_RX_MEMPOOL_SIZE	(76 * 1024 * 1024) /* 76MB */
+#define LKL_DPDKIO_RX_MEMPOOL_SIZE	(64 * 1024 * 1024) /* 76MB */
 
 
 /* tools/lkl/lib/dpdkio.c */

@@ -611,15 +611,16 @@ static int dpdkio_init_dev(int port)
 	/* prepare memory region for receiving packets */
 	for (rx_mem_size = 0; rx_mem_size < LKL_DPDKIO_RX_MEMPOOL_SIZE;) {
 		size_t size = MAX_ORDER_NR_PAGES * PAGE_SIZE;
-		void *mem = kmalloc(size, GFP_KERNEL);
+		struct page *page;
+		void *mem;
 
-		if (!mem) {
-			pr_err("failed to alloc %lu-bytes for rx mem region\n",
-			       size);
+		page = alloc_pages(GFP_KERNEL, MAX_ORDER - 1);
+		if (!page) {
+			pr_err("failed to alloc %lu-bytes pages \n", size);
 			goto free_dpdkio;
 		}
 
-		memset(mem, 0, size);
+		mem = page_address(page);
 		ret = lkl_ops->dpdkio_ops->add_rx_region(dpdk->portid,
 							 (uintptr_t)mem, size);
 		if (ret) {

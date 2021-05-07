@@ -154,13 +154,13 @@ static int pcap_init_file(const char *filename)
 	return fd;
 }
 
-static int pcap_write_packet(int fd, struct lkl_iovec *segs, int nsegs)
+static int pcap_write_packet(int fd, struct lkl_dpdkio_seg *segs, int nsegs)
 {
 	struct pcap_pkt_hdr hdr;
 	int n, ret, pktlen = 0;
 
 	for (n = 0; n < nsegs; n++)
-		pktlen += segs[n].iov_len;
+		pktlen += segs[n].data_len;
 
 	hdr.ts_sec = 0;
 	hdr.ts_usec = 0;
@@ -174,11 +174,14 @@ static int pcap_write_packet(int fd, struct lkl_iovec *segs, int nsegs)
 		return -1;
 	}
 
-	ret = writev(fd, (struct iovec *)segs, nsegs);
-	if (ret < 0) {
-		fprintf(stderr, "failed to write a packet: %s\n",
-			strerror(errno));
-		return -1;
+	for (n = 0; n < nsegs; n++) {
+		void *addr = (void *)(segs[n].buf_addr + data_off);
+		ret = write(fd, addr, data_len);
+		if (ret < 0) {
+			fprintf(stderr, "failed to write a packet: %s\n",
+				strerror(errno));
+			return -1;
+		}
 	}
 
 	fsync(fd);
@@ -649,8 +652,10 @@ static int dpdkio_rx_mbuf_to_slot(int portid, struct rte_mbuf *_mbuf,
 	mbuf = _mbuf;
 
 	for (n = 0; n < _mbuf->nb_segs; n++) {
-		slot->segs[n].iov_base = rte_pktmbuf_mtod(mbuf, void *);
-		slot->segs[n].iov_len = mbuf->data_len;
+		slot->segs[n].buf_addr = (uintptr_t)mbuf->buf_addr;
+		slot->segs[n].buf_len = mbuf->buf_len;
+		slot->segs[n].data_off = mbuf->data_off;
+		slot->segs[n].data_len = mbuf->data_len;
 		mbuf = mbuf->next;
 	}
 
@@ -723,15 +728,18 @@ static int dpdkio_rx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 
 	nb_rx = rte_eth_rx_burst(portid, 0, mbufs, nb_pkts);
 
+	pr_info("\n==== RX ====\n");
 	for (i = 0, n = 0; n < nb_rx; n++) {
-		pr_info("\n==== RX ====\n");
 		rte_pktmbuf_dump(stdout, mbufs[n], 0);
 		ret = dpdkio_rx_mbuf_to_slot(portid, mbufs[n], slots[i]);
-		if (unlikely(ret < 0))
+		if (unlikely(ret < 0)) {
+			pr_err("dpdkio_rx_mbuf_to_slot failed\n");
 			continue; /* advance only mbuf index 'n', not 'i' */
+		}
 		i++;
 	}
 
+	pr_info("return %d\n", i);
 	return i;
 }
 
@@ -766,12 +774,6 @@ static void dpdkio_extmem_free_cb(void *addr, void *opaque)
 	__sync_synchronize();
 }
 
-static inline rte_iova_t dpdkio_seg_iova(struct dpdkio_port *port,
-					 struct lkl_iovec *seg)
-{
-	return rte_mem_virt2iova(seg->iov_base);
-}
-
 static void dpdkio_fill_mbuf_tx_offload(struct lkl_dpdkio_slot *slot,
 					struct rte_mbuf *mbuf)
 {
@@ -797,6 +799,138 @@ static void dpdkio_fill_mbuf_tx_offload(struct lkl_dpdkio_slot *slot,
 	}
 }
 
+#define PAGE_SIZE 4096
+
+
+
+static inline void dpdkio_pull_page_size_headroom(struct lkl_dpdkio_seg *seg)
+{
+	/* pull headroom larger than PAGE_SIZE */
+	while (seg->data_off >= PAGE_SIZE) {
+		seg->buf_addr += PAGE_SIZE;
+		seg->buf_len -= PAGE_SIZE;
+		seg->data_off -= PAGE_SIZE;
+	}
+}
+
+static struct rte_mbuf *dpdkio_tx_slot_to_mbuf(int portid,
+					       struct lkl_dpdkio_slot *slot)
+{
+#define MAX_NB_MBUFS 20
+	struct dpdkio_port *port = dpdkio_port_get(portid);
+	struct rte_mbuf_ext_shared_info *shinfo;
+	struct rte_mbuf *mbufs[MAX_NB_MBUFS], *mbuf;
+	struct lkl_dpdkio_seg *seg;
+	int nb_mbufs, n, ret, m;
+	void *buf_addr;
+
+	nb_mbufs = 0;
+	for (n = 0; n < slot->nsegs; n++) {
+		seg = &slot->segs[n];
+		dpdkio_pull_page_size_headroom(seg);
+		int data_size = seg->data_len + seg->data_off;
+		while (data_size > 0) {
+			nb_mbufs++;
+			data_size -= PAGE_SIZE;
+		};
+	}
+
+	if (unlikely(nb_mbufs > MAX_NB_MBUFS)) {
+ 		pr_err("too many (%d) mbufs required!\n", nb_mbufs);
+		return NULL;
+	}
+
+	ret = rte_pktmbuf_alloc_bulk(port->tx_mempool, mbufs, nb_mbufs);
+	if (unlikely(ret < 0)) {
+		pr_err("failed to alloc mbuf!!\n");
+		return NULL;
+	}
+
+	shinfo = dpdkio_get_mbuf_shared_info(slot);
+	shinfo->free_cb = dpdkio_extmem_free_cb;
+	shinfo->fcb_opaque = slot;
+	rte_mbuf_ext_refcnt_set(shinfo, 1);
+
+	m = 0;
+	for (n = 0; n < slot->nsegs; n++) {
+		seg = &slot->segs[n];
+
+		while (seg->data_len > 0) {
+			buf_addr = (void *)seg->buf_addr;
+			unsigned int data_off = seg->data_off;
+			unsigned int data_len;
+			unsigned int buf_len;
+
+			if (data_off + seg->data_len > PAGE_SIZE)
+				data_len = PAGE_SIZE - data_off;
+			else
+				data_len = seg->data_len;
+
+			if (seg->buf_len > PAGE_SIZE)
+				buf_len = PAGE_SIZE;
+			else
+				buf_len = seg->buf_len;
+
+			pr_info("buf 0x%lx len %u data off %u len %u\n",
+				(uintptr_t)buf_addr, buf_len, data_off, data_len);
+
+			mbuf = mbufs[m];
+			rte_pktmbuf_attach_extbuf(mbuf, buf_addr,
+						  rte_mem_virt2iova(buf_addr),
+						  buf_len, shinfo);
+			mbuf->data_len = data_len;
+			mbuf->data_off = data_off;
+			mbuf->pkt_len = data_len;
+			
+			seg->buf_addr += (uintptr_t)(data_len + data_off);
+			seg->buf_len -= buf_len;
+			pr_info("seg->data_len is %u data_len is %u\n",
+				seg->data_len, data_len);
+			seg->data_len -= data_len;
+			seg->data_off -= data_off;	/* make it 0 */
+
+			if (m > 0) {
+				ret = rte_pktmbuf_chain(mbufs[0], mbuf);
+				if (unlikely(ret < 0)) {
+					pr_err("mbuf chain failed\n");
+					assert(0);
+				}
+			}
+
+			m++;
+		}
+	}
+
+	dpdkio_fill_mbuf_tx_offload(slot, mbufs[0]);
+
+	return mbufs[0];
+}
+
+static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
+{
+	struct rte_mbuf *mbufs[nb_pkts], *mbuf;
+	int n, i;
+
+	printf("dpdkio_tx ===============\n");
+	for (i = 0, n = 0; n < nb_pkts; n++) {
+		mbuf = dpdkio_tx_slot_to_mbuf(portid, slots[n]);
+		rte_pktmbuf_dump(stdout, mbuf, 0);
+		if (likely(mbuf)) {
+			mbufs[i] = mbuf;
+			i++;
+		}
+	}
+	printf("=========================\n");
+
+	if (unlikely(i == 0)) {
+		pr_err("0 tx\n");
+		return 0;
+	}
+
+	return rte_eth_tx_burst(portid, 0, mbufs, i);
+}
+
+#if 0
 static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 {
 	struct dpdkio_port *port = dpdkio_port_get(portid);
@@ -844,31 +978,16 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 		head = NULL;
 
 		for (i = 0; i < slot->nsegs; i++) {
-			struct lkl_iovec *seg = &slot->segs[i];
+			struct lkl_dpdkio_seg *seg = &slot->segs[i];
 			struct rte_mbuf *mbuf = mbufs[mbufcnt++];
+			void *buf_addr = (void *)seg->buf_addr;
 
-
-			/* align to 4k-byte */
-#if 0
-			unsigned long offset, size;
-			offset = (uintptr_t)seg->iov_base & 0x0FFF;
-			size = seg->iov_len + offset;
-
-			rte_pktmbuf_attach_extbuf(mbuf,
-						  seg->iov_base - offset,
-						  dpdkio_seg_iova(port, seg),
-						  seg->iov_len + offset, shinfo);
-			mbuf->pkt_len = seg->iov_len;
-			mbuf->data_len = size;
-			mbuf->data_off = offset;
-#else
-			rte_pktmbuf_attach_extbuf(mbuf,
-						  seg->iov_base,
-						  dpdkio_seg_iova(port, seg),
-						  seg->iov_len, shinfo);
-			mbuf->pkt_len = seg->iov_len;
-			mbuf->data_len = seg->iov_len;
-#endif
+			rte_pktmbuf_attach_extbuf(mbuf, buf_addr,
+						  rte_mem_virt2iova(buf_addr),
+						  seg->buf_len, shinfo);
+			mbuf->data_len = seg->data_len;
+			mbuf->data_off = seg->data_off;
+			mbuf->pkt_len = seg->data_len;
 
 			if (head == NULL) {
 				/* the first mbuf of this packet */
@@ -885,8 +1004,8 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 		}
 
 		dpdkio_fill_mbuf_tx_offload(slot, mbufs_tx[mbufs_tx_cnt]);
-		pr_info("\n==== TX ====\n");
-		rte_pktmbuf_dump(stdout, mbufs_tx[mbufs_tx_cnt], 0);
+//		pr_info("\n==== TX ====\n");
+//		rte_pktmbuf_dump(stdout, mbufs_tx[mbufs_tx_cnt], 0);
 
 		mbufs_tx_cnt++;
 	}
@@ -896,6 +1015,7 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 
 	return ret;
 }
+#endif
 
 static void dpdkio_get_macaddr(int portid, char *mac)
 {

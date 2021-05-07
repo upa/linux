@@ -1,13 +1,20 @@
 #ifndef _ASM_UAPI_LKL_DPDKIO_H
 #define _ASM_UAPI_LKL_DPDKIO_H
 
-#define LKL_DPDKIO_MAX_BURST	128
-#define LKL_DPDKIO_MAX_SEGS	16
+#define LKL_DPDKIO_MAX_BURST	64
+#define LKL_DPDKIO_MAX_SEGS	18
+
+struct lkl_dpdkio_seg {
+	unsigned long	buf_addr;
+	unsigned int	buf_len;
+	unsigned int	data_off;
+	unsigned int	data_len;
+};
 
 struct lkl_dpdkio_slot {
-	struct iovec	segs[LKL_DPDKIO_MAX_SEGS]; /* sg list for a packet */
-	int		nsegs;			/* number of segs */
-	uint32_t	pkt_len;		/* total packet length */
+	struct lkl_dpdkio_seg	segs[LKL_DPDKIO_MAX_SEGS]; /* sg list for a packet */
+	int			nsegs;			/* number of segs */
+	uint32_t		pkt_len;		/* total packet length */
 
 	void 	*mbuf;	/* pointer to struct mbuf of this packet */
 	void	*skb;	/* pointer to struct sk_buff of this packet */

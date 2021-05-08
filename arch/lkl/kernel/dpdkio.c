@@ -13,7 +13,7 @@
 #include <uapi/asm/dpdkio.h>
 
 
-/* XXX* shoud be a list */
+/* XXX: shoud be a list */
 #define MAX_DPDK_PORTS	4
 static int dpdk_ports[MAX_DPDK_PORTS];	/* dpdk ports */
 static int dpdk_nports;
@@ -40,8 +40,6 @@ static int __init dpdkio_append_dpdk_port(char *str)
 }
 early_param("lkl_dpdkio", dpdkio_append_dpdk_port);
 
-
-static struct list_head dpdkio_list;	/* struct dpdkio_dev */
 
 /* dpdkio device */
 struct dpdkio_dev {
@@ -73,11 +71,16 @@ struct dpdkio_dev {
 	int			irq;		/* rx interrupt number */
 	int			irq_ack_fd;	/* eventfd for ack irq */
 	struct napi_struct	napi;
+
+	/* skb queue to be released */
+	struct lkl_dpdkio_ring free_skb_ring;
 };
 
-static void dpdkio_prepare(void)
+static struct dpdkio_dev *dpdk_devs[MAX_DPDK_PORTS];
+
+static inline struct dpdkio_dev *dpdkio_dev_get(int portid)
 {
-	INIT_LIST_HEAD(&dpdkio_list);
+	return dpdk_devs[portid];
 }
 
 
@@ -157,7 +160,29 @@ static int dpdkio_close(struct net_device *dev)
 	return 0;
 }
 
- static void dpdkio_fill_slot_tx_offload(struct sk_buff *skb,
+#define MAX_FREE_SKB_BULK_NUM 8
+
+static void dpdkio_free_tx_skb(struct dpdkio_dev *dpdk)
+{
+	struct lkl_dpdkio_ring *r = &dpdk->free_skb_ring;
+	struct sk_buff *skb;
+	unsigned int b, n;
+
+	b = lkl_dpdkio_ring_read_avail(r);
+	b = b > MAX_FREE_SKB_BULK_NUM ? MAX_FREE_SKB_BULK_NUM : b;
+	if (!b) {
+		return;
+	}
+
+	for (n = 0; n < b; n++) {
+		skb = r->ptrs[(r->tail + n) & LKL_DPDKIO_RING_MASK];
+		dev_kfree_skb_any(skb);
+	}
+
+	lkl_dpdkio_ring_read_next(r, b);
+}
+
+static void dpdkio_fill_slot_tx_offload(struct sk_buff *skb,
 					struct lkl_dpdkio_slot *slot)
 {
 	unsigned char *l2, *l3, *l4, *l5;
@@ -231,25 +256,6 @@ static struct lkl_dpdkio_slot *dpdkio_get_free_tx_slot(struct dpdkio_dev *dpdk)
 	return slot;
 }
 
-static void dpdkio_dump_slot(struct lkl_dpdkio_slot *slot)
-{
-	int n;
-
-	pr_info("==== dump slot ====\n");
-	pr_info("- nsegs   %d\n", slot->nsegs);
-	pr_info("- pkt_len %d\n", slot->pkt_len);
-	pr_info("- l2:%u l3:%u l4:%u segsz:%u",
-		slot->l2_len, slot->l3_len, slot->l4_len, slot->tso_segsz);
-
-	for (n = 0; n < slot->nsegs; n++) {
-		struct lkl_dpdkio_seg *seg = &slot->segs[n];
-		pr_info("- seg[%d] buf 0x%lx len %u data off %u len %u\n", n,
-			seg->buf_addr, seg->buf_len,
-			seg->data_off, seg->data_len);
-	}
-	pr_info("===================\n");
-}
-
 static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 				     struct net_device *dev)
 {
@@ -264,6 +270,9 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 
 	/* XXX: we assume that there is no race conditions on the
 	 * dpdkio TX path because of LKL */
+
+	/* XXX: free TXed skbs. should it be workqueue??? */
+	dpdkio_free_tx_skb(dpdk);
 
 #ifdef DUMP_TX
  	pr_info("\n========== dump tx ==========\n");
@@ -322,11 +331,6 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 
 	dpdkio_fill_slot_tx_offload(skb, slot);
 
-//#define DUMP_TX
-#ifdef DUMP_TX
-	dpdkio_dump_slot(slot);
-#endif
-
 	/* set skb to slot to free skb when mbuf is released */
 	slot->skb = skb;
 
@@ -363,7 +367,7 @@ out_drop:
 	return NETDEV_TX_OK;
 }
 
-static bool dpdkio_recycle_rx_slot(struct lkl_dpdkio_slot *slot)
+static bool dpdkio_recycle_rx_slot(int portid, struct lkl_dpdkio_slot *slot)
 {
 	struct sk_buff *skb;
 
@@ -379,7 +383,7 @@ static bool dpdkio_recycle_rx_slot(struct lkl_dpdkio_slot *slot)
 		slot->skb = NULL;
 
 		if (slot->mbuf) {
-			lkl_ops->dpdkio_ops->mbuf_free(slot->mbuf);
+			lkl_ops->dpdkio_ops->mbuf_free(portid, slot->mbuf);
 			slot->mbuf = NULL;
 		}
 		return true;
@@ -487,7 +491,7 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 	/* obtain free slots while walking around the rxslot ring */
 	for (i = 0, n = 0; n < LKL_DPDKIO_SLOT_NUM; n++) {
 		slot = &dpdk->rxslots[head];
-		if (dpdkio_recycle_rx_slot(slot)) {
+		if (dpdkio_recycle_rx_slot(dpdk->portid, slot)) {
 			slots[i++] = slot;
 			if (i >= b)
 				break;
@@ -512,8 +516,6 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 	nr_pkts = 0;
 	for (n = 0; n < nr_rx; n++) {
 		struct sk_buff *skb;
-
-		//dpdkio_dump_slot(slots[n]);
 
 		skb = dpdkio_rx_slot_to_skb(dpdk, slots[n]);
 		if (unlikely(!skb)) {
@@ -598,7 +600,7 @@ static int dpdkio_init_netdev(struct net_device *dev)
 
 	netif_carrier_off(dev);
 
-	netif_napi_add(dev, &dpdk->napi, dpdkio_poll, 32);
+	netif_napi_add(dev, &dpdk->napi, dpdkio_poll, LKL_DPDKIO_MAX_BURST);
 
 	return 0;
 }
@@ -610,7 +612,7 @@ static int dpdkio_init_dev(int port)
 	struct net_device *dev;
 	size_t rx_mem_size;
 	int nb_rxd, nb_txd;
-	int ret = 0;
+	int ret = 0, n;
 
 	dev = alloc_etherdev(sizeof(struct dpdkio_dev));
 	if (!dev) {
@@ -622,6 +624,14 @@ static int dpdkio_init_dev(int port)
 	memset(dpdk, 0, sizeof(*dpdk));
 	dpdk->dev = dev;
 	dpdk->portid = port;
+	
+
+	for (n = 0; n < LKL_DPDKIO_SLOT_NUM; n++) {
+		dpdk->txslots[n].portid = port;
+		dpdk->rxslots[n].portid = port;
+	}
+
+	dpdk_devs[port] = dpdk;
 
 	ret = lkl_ops->dpdkio_ops->init_port(dpdk->portid);
 	if (ret < 0) {
@@ -680,13 +690,16 @@ free_dpdkio:
 	return ret;
 }
 
-static void dpdkio_kfree_skb(void *skb)
+static void dpdkio_free_skb(int portid, void *skb)
 {
-	if (!skb) {
-		pr_err("%s: null skb!\n", __func__);
-		return;
-	}
-	kfree_skb((struct sk_buff *)skb);
+	struct dpdkio_dev *dpdk = dpdkio_dev_get(portid);
+	struct lkl_dpdkio_ring *r = &dpdk->free_skb_ring;
+
+	if (unlikely(lkl_dpdkio_ring_full(r)))
+		panic("skb free ring full on port %d!\n", portid);
+
+	r->ptrs[r->head] = skb;
+	lkl_dpdkio_ring_write_next(r, 1);
 }
 
 static int __init dpdkio_init(void)
@@ -698,8 +711,7 @@ static int __init dpdkio_init(void)
 
 	pr_info("start to init lkl dpdkio\n");
 
-	dpdkio_prepare();
-	lkl_ops->dpdkio_ops->free_skb = dpdkio_kfree_skb;
+	lkl_ops->dpdkio_ops->free_skb = dpdkio_free_skb;
 
 	for (n = 0; n < dpdk_nports; n++) {
 		ret = dpdkio_init_dev(dpdk_ports[n]);

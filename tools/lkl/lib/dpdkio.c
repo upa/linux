@@ -43,8 +43,8 @@ int lkl_dpdkio_exit(void)
 				 __func__, ##__VA_ARGS__)
 
 
-#define DEBUG_PKT_TX
-#define DEBUG_PKT_RX
+//#define DEBUG_PKT_TX
+//#define DEBUG_PKT_RX
 
 /* lkl_dpdkio_init()
  *
@@ -91,6 +91,9 @@ struct dpdkio_port {
 	/* tx */
 	char		tx_mempool_name[DPDKIO_MEM_NAME_MAX];
 	struct rte_mempool	*tx_mempool;
+
+	/* mbuf queue to be released */
+	struct lkl_dpdkio_ring free_mbuf_ring;
 
 #ifdef DEBUG_PCAP
 	/* debug */
@@ -200,16 +203,16 @@ static void dpdkio_slot_dump(struct lkl_dpdkio_slot *slot)
 	int n;
 
 	printf("dump lkl_dpdkio_slot: 0x%lx\n", (uintptr_t)slot);
-	printf("- nsegs    %d\n", slot->nsegs);
-	printf("- pkt_len  %u\n", slot->pkt_len);
-	printf("- mbuf     0x%lx\n", (uintptr_t)slot->mbuf);
-	printf("- skb      0x%lx\n", (uintptr_t)slot->skb);
-	printf("- l2:%u l3:%u l4:%u segsz:%u\n",
+	printf("  - nsegs    %d\n", slot->nsegs);
+	printf("  - pkt_len  %u\n", slot->pkt_len);
+	printf("  - mbuf     0x%lx\n", (uintptr_t)slot->mbuf);
+	printf("  - skb      0x%lx\n", (uintptr_t)slot->skb);
+	printf("  - l2:%u l3:%u l4:%u segsz:%u\n",
 	       slot->l2_len, slot->l3_len, slot->l4_len, slot->tso_segsz);
 
 	for (n = 0; n < slot->nsegs; n++) {
 		struct lkl_dpdkio_seg *seg = &slot->segs[n];
-		printf("seg[%02d] buf 0x%lx %u byte, data off %u len %u\n",
+		printf("  seg[%02d] buf 0x%lx %u byte, data off %u len %u\n",
 		       n, seg->buf_addr, seg->buf_len,
 		       seg->data_off, seg->data_len);
 	}
@@ -455,7 +458,7 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 	/* tx mbuf can be small because packet payload is allocated
 	 * along with sk_buff. It is attached as extmem. */
 	port->tx_mempool = rte_pktmbuf_pool_create(port->tx_mempool_name,
-						   nb_txd << 1, 512, 0,
+						   nb_txd << 2, 512, 0,
 						   64, rte_socket_id());
 	if (!port->tx_mempool) {
 		pr_err("faield to create tx mbuf pool %s: %s\n",
@@ -486,7 +489,7 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 	}
 
 	port->rx_mempool = rte_pktmbuf_pool_create_extbuf
-		(port->rx_mempool_name, nb_rxd << 1, 512, 0, mbuf_size,
+		(port->rx_mempool_name, nb_rxd << 2, 512, 0, mbuf_size,
 		 rte_socket_id(), ext_mem, nr_extmem);
 
 	if (!port->rx_mempool) {
@@ -747,10 +750,47 @@ static int dpdkio_rx_mbuf_to_slot(int portid, struct rte_mbuf *_mbuf,
 	return 0;
 }
 
+static void dpdkio_mbuf_free(int portid, void *mbuf)
+{
+	struct dpdkio_port *port = dpdkio_port_get(portid);
+	struct lkl_dpdkio_ring *r = &port->free_mbuf_ring;
+
+	if (unlikely(lkl_dpdkio_ring_full(r))) {
+		pr_err("mbuf free ring full on port %d!\n!", portid);
+		assert(0); /* XXX */
+	}
+
+	r->ptrs[r->head] = mbuf;
+	lkl_dpdkio_ring_write_next(r, 1);
+}
+
+#define MAX_FREE_MBUF_BULK_NUM	32
+
+static void dpdkio_free_rx_mbuf(int portid)
+{
+	struct dpdkio_port *port = dpdkio_port_get(portid);
+	struct lkl_dpdkio_ring *r = &port->free_mbuf_ring;
+	struct rte_mbuf *mbufs[MAX_FREE_MBUF_BULK_NUM];
+	unsigned int b, n;
+
+	b = lkl_dpdkio_ring_read_avail(r);
+	b = b > MAX_FREE_MBUF_BULK_NUM ? MAX_FREE_MBUF_BULK_NUM : b;
+	if (!b)
+		return;
+
+	for (n = 0; n < b; n++)
+		mbufs[n] = r->ptrs[(r->tail + n) & LKL_DPDKIO_RING_MASK];
+
+	rte_pktmbuf_free_bulk(mbufs, b);
+	lkl_dpdkio_ring_read_next(r, b);
+}
+
 static int dpdkio_rx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 {
 	struct rte_mbuf *mbufs[LKL_DPDKIO_MAX_BURST];
 	int nb_rx, n, i, ret;
+
+	dpdkio_free_rx_mbuf(portid);
 
 	nb_rx = rte_eth_rx_burst(portid, 0, mbufs, nb_pkts);
 
@@ -776,11 +816,6 @@ static int dpdkio_rx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 	return i;
 }
 
-static void dpdkio_mbuf_free(void *mbuf)
-{
-	rte_pktmbuf_free((struct rte_mbuf *)mbuf);
-	return;
-}
 
 static struct rte_mbuf_ext_shared_info *
 dpdkio_get_mbuf_shared_info(struct lkl_dpdkio_slot *slot)
@@ -802,7 +837,7 @@ static void dpdkio_extmem_free_cb(void *addr, void *opaque)
 	 * ^- it is changed. chained mbufs is counted as refcnt 1?
 	 */
 
-	lkl_host_ops.dpdkio_ops->free_skb(slot->skb);
+	lkl_host_ops.dpdkio_ops->free_skb(slot->portid, slot->skb);
 	slot->skb = NULL;
 	__sync_synchronize();
 }
@@ -832,9 +867,11 @@ static void dpdkio_fill_mbuf_tx_offload(struct lkl_dpdkio_slot *slot,
 	}
 }
 
-#define PAGE_SIZE 4096
 
 
+
+#if 0
+#define PAGE_SIZE	4096
 
 static inline void dpdkio_pull_page_size_headroom(struct lkl_dpdkio_seg *seg)
 {
@@ -846,6 +883,7 @@ static inline void dpdkio_pull_page_size_headroom(struct lkl_dpdkio_seg *seg)
 	}
 }
 
+/* This function aligns packet to 4k-byte mbufs */
 static struct rte_mbuf *dpdkio_tx_slot_to_mbuf(int portid,
 					       struct lkl_dpdkio_slot *slot)
 {
@@ -935,9 +973,58 @@ static struct rte_mbuf *dpdkio_tx_slot_to_mbuf(int portid,
 	return mbufs[0];
 }
 
+#else
+
+static struct rte_mbuf *dpdkio_tx_slot_to_mbuf(int portid,
+					       struct lkl_dpdkio_slot *slot)
+{
+	struct dpdkio_port *port = dpdkio_port_get(portid);
+	struct rte_mbuf_ext_shared_info *shinfo;
+	struct rte_mbuf *mbufs[LKL_DPDKIO_MAX_SEGS];
+	int ret, n;
+
+	ret = rte_pktmbuf_alloc_bulk(port->tx_mempool, mbufs, slot->nsegs);
+	if (unlikely(ret < 0)) {
+		pr_err("failed to alloc mbuf!!\n");
+		return NULL;
+	}
+
+	shinfo = dpdkio_get_mbuf_shared_info(slot);
+	shinfo->free_cb = dpdkio_extmem_free_cb;
+	shinfo->fcb_opaque = slot;
+	rte_mbuf_ext_refcnt_set(shinfo, 1);
+
+	for (n = 0; n < slot->nsegs; n++) {
+		struct lkl_dpdkio_seg *seg = &slot->segs[n];
+		struct rte_mbuf *mbuf = mbufs[n];
+		void *buf_addr = (void *)seg->buf_addr;
+
+		rte_pktmbuf_attach_extbuf(mbuf, buf_addr,
+					  rte_mem_virt2iova(buf_addr),
+					  seg->buf_len, shinfo);
+		mbuf->data_len = seg->data_len;
+		mbuf->data_off = seg->data_off;
+		mbuf->pkt_len = seg->data_len;
+
+		if (n > 0) {
+			ret = rte_pktmbuf_chain(mbufs[0], mbuf);
+			if (unlikely(ret < 0)) {
+				pr_err("mbuf chain failed\n");
+				assert(0);
+			}
+		}
+	}
+
+	dpdkio_fill_mbuf_tx_offload(slot, mbufs[0]);
+
+	return mbufs[0];
+}
+
+#endif
+
 static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 {
-	struct rte_mbuf *mbufs[nb_pkts], *mbuf;
+	struct rte_mbuf *mbufs[LKL_DPDKIO_MAX_BURST], *mbuf;
 	int n, i;
 
 	for (i = 0, n = 0; n < nb_pkts; n++) {

@@ -1,8 +1,8 @@
 #ifndef _ASM_UAPI_LKL_DPDKIO_H
 #define _ASM_UAPI_LKL_DPDKIO_H
 
-#define LKL_DPDKIO_MAX_BURST	64
-#define LKL_DPDKIO_MAX_SEGS	18
+#define LKL_DPDKIO_MAX_BURST	32
+#define LKL_DPDKIO_MAX_SEGS	16
 
 struct lkl_dpdkio_seg {
 	unsigned long	buf_addr;
@@ -12,9 +12,9 @@ struct lkl_dpdkio_seg {
 };
 
 struct lkl_dpdkio_slot {
-	struct lkl_dpdkio_seg	segs[LKL_DPDKIO_MAX_SEGS]; /* sg list for a packet */
-	int			nsegs;			/* number of segs */
-	uint32_t		pkt_len;		/* total packet length */
+	struct lkl_dpdkio_seg	segs[LKL_DPDKIO_MAX_SEGS]; /* packet  */
+	int			nsegs;		/* number of segs */
+	uint32_t		pkt_len;	/* total packet length */
 
 	void 	*mbuf;	/* pointer to struct mbuf of this packet */
 	void	*skb;	/* pointer to struct sk_buff of this packet */
@@ -37,7 +37,9 @@ struct lkl_dpdkio_slot {
 	/* rx checksum, LKL_DPDKIO_RX_IP_CKSUM_* */
 	uint8_t		rx_ip_cksum_result;
 
-	char opaque[32]; /* used as rte_mbuf_ext_shared_info structures */
+	uint16_t	portid;	/* dpdkio port id */
+
+	char opaque[32];  /* used as rte_mbuf_ext_shared_info structures */
 };
 
 /* XXX: we need to consider L4 checksum */
@@ -56,7 +58,7 @@ struct lkl_dpdkio_slot {
  (LKL_DPDKIO_SLOT_NUM x LKL_DPDKIO_MAX_SEGS). */
 
 
-#define LKL_DPDKIO_DESC_NUM		1024
+#define LKL_DPDKIO_DESC_NUM		512
 //#define LKL_DPDKIO_RX_MEMPOOL_SIZE	(4 * 1024 * 1024) /* 4MB */
 #define LKL_DPDKIO_RX_MEMPOOL_SIZE	(64 * 1024 * 1024) /* 76MB */
 
@@ -64,5 +66,66 @@ struct lkl_dpdkio_slot {
 /* tools/lkl/lib/dpdkio.c */
 int lkl_dpdkio_init(int argc, char **argv);
 int lkl_dpdkio_exit(void);
+
+
+/* ring queue for freeing mbuf (lkl rx -> dpdk) and skb (dpdk tx -> lkl) */
+
+#define LKL_DPDKIO_RING_SIZE	512	/* power of 2*/
+#define LKL_DPDKIO_RING_MASK   	(LKL_DPDKIO_RING_SIZE - 1)
+
+struct lkl_dpdkio_ring {
+	unsigned int	head;
+	unsigned int	tail;
+
+	void		*ptrs[LKL_DPDKIO_RING_SIZE];
+};
+/* XXX: needs lock? there are only a reader and a writer */
+
+static inline int lkl_dpdkio_ring_emtpy(struct lkl_dpdkio_ring *r)
+{
+	return (r->head == r->tail) ? 1 : 0;
+}
+
+static inline int lkl_dpdkio_ring_full(struct lkl_dpdkio_ring *r)
+{
+	return (((r->head + 1) & LKL_DPDKIO_RING_MASK) == r->tail) ? 1: 0;
+}
+
+static inline void lkl_dpdkio_ring_write_next(struct lkl_dpdkio_ring *r,
+					  unsigned int n)
+{
+	r->head = (r->head + n) & LKL_DPDKIO_RING_MASK;
+}
+
+static inline void lkl_dpdkio_ring_read_next(struct lkl_dpdkio_ring *r,
+					 unsigned int n)
+{
+	r->tail = (r->tail + n) & LKL_DPDKIO_RING_MASK;
+}
+
+static inline unsigned int lkl_dpdkio_ring_write_avail(struct lkl_dpdkio_ring *r)
+{
+	if (r->tail > r->head) {
+		return r->tail - r->head;
+	} if (r->head > r->tail) {
+		return LKL_DPDKIO_RING_MASK - r->head + r->tail + 1;
+	}
+
+	/* ring empty, all slots are avaialble */
+	return LKL_DPDKIO_RING_MASK;
+}
+
+static inline unsigned int lkl_dpdkio_ring_read_avail(struct lkl_dpdkio_ring *r)
+{
+	if (r->head > r->tail) {
+		return r->head - r->tail;
+	} if (r->tail > r->head) {
+		return LKL_DPDKIO_RING_MASK - r->tail + r->head + 1;
+	}
+
+	/* ring empty */
+	return 0;
+}
+
 
 #endif

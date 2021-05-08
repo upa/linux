@@ -265,7 +265,7 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 	/* XXX: we assume that there is no race conditions on the
 	 * dpdkio TX path because of LKL */
 
- #ifdef DUMP_TX
+#ifdef DUMP_TX
  	pr_info("\n========== dump tx ==========\n");
 	skb_dump(KERN_WARNING, skb, false);
 #endif
@@ -322,7 +322,7 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 
 	dpdkio_fill_slot_tx_offload(skb, slot);
 
-#define DUMP_TX
+//#define DUMP_TX
 #ifdef DUMP_TX
 	dpdkio_dump_slot(slot);
 #endif
@@ -510,12 +510,10 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 	/* build skb */
 	nr_bytes = 0;
 	nr_pkts = 0;
-	pr_info("nr_rx is %d\n", nr_rx);
 	for (n = 0; n < nr_rx; n++) {
 		struct sk_buff *skb;
 
-		pr_info("slot %d/%d\n", n, nr_rx);
-		dpdkio_dump_slot(slots[n]);
+		//dpdkio_dump_slot(slots[n]);
 
 		skb = dpdkio_rx_slot_to_skb(dpdk, slots[n]);
 		if (unlikely(!skb)) {
@@ -523,13 +521,11 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 			continue;
 		}
 
-		skb_dump(KERN_WARNING, skb, false);
 		napi_gro_receive(&dpdk->napi, skb);
 
 		nr_pkts++;
 		nr_bytes += slots[n]->pkt_len;
 	}
- 	pr_info("nr_pkts %llu\n", nr_pkts);
 
 	dev->stats.rx_packets += nr_pkts;
 	dev->stats.rx_bytes += nr_bytes;

@@ -43,6 +43,9 @@ int lkl_dpdkio_exit(void)
 				 __func__, ##__VA_ARGS__)
 
 
+#define DEBUG_PKT_TX
+#define DEBUG_PKT_RX
+
 /* lkl_dpdkio_init()
  *
  * initialize dpdk eal invoked from lkl/lib. This function must be
@@ -190,6 +193,29 @@ static int pcap_write_packet(int fd, struct lkl_dpdkio_seg *segs, int nsegs)
 }
 
 #endif /* DEBUG_PCAP */
+
+#if defined(DEBUG_PKT_TX) || defined(DEBUG_PKT_RX)
+static void dpdkio_slot_dump(struct lkl_dpdkio_slot *slot)
+{
+	int n;
+
+	printf("dump lkl_dpdkio_slot: 0x%lx\n", (uintptr_t)slot);
+	printf("- nsegs    %d\n", slot->nsegs);
+	printf("- pkt_len  %u\n", slot->pkt_len);
+	printf("- mbuf     0x%lx\n", (uintptr_t)slot->mbuf);
+	printf("- skb      0x%lx\n", (uintptr_t)slot->skb);
+	printf("- l2:%u l3:%u l4:%u segsz:%u\n",
+	       slot->l2_len, slot->l3_len, slot->l4_len, slot->tso_segsz);
+
+	for (n = 0; n < slot->nsegs; n++) {
+		struct lkl_dpdkio_seg *seg = &slot->segs[n];
+		printf("seg[%02d] buf 0x%lx %u byte, data off %u len %u\n",
+		       n, seg->buf_addr, seg->buf_len,
+		       seg->data_off, seg->data_len);
+	}
+	printf("\n");
+}
+#endif
 
 static void *dpdkio_malloc(int size)
 {
@@ -728,10 +754,18 @@ static int dpdkio_rx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 
 	nb_rx = rte_eth_rx_burst(portid, 0, mbufs, nb_pkts);
 
-	pr_info("\n==== RX ====\n");
 	for (i = 0, n = 0; n < nb_rx; n++) {
+#ifdef DEBUG_PKT_RX
+		pr_warn("======== RX ========\n");
 		rte_pktmbuf_dump(stdout, mbufs[n], 0);
+#endif
+
 		ret = dpdkio_rx_mbuf_to_slot(portid, mbufs[n], slots[i]);
+
+#ifdef DEBUG_PKT_RX
+		dpdkio_slot_dump(slots[i]);
+#endif
+
 		if (unlikely(ret < 0)) {
 			pr_err("dpdkio_rx_mbuf_to_slot failed\n");
 			continue; /* advance only mbuf index 'n', not 'i' */
@@ -739,7 +773,6 @@ static int dpdkio_rx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 		i++;
 	}
 
-	pr_info("return %d\n", i);
 	return i;
 }
 
@@ -871,21 +904,17 @@ static struct rte_mbuf *dpdkio_tx_slot_to_mbuf(int portid,
 			else
 				buf_len = seg->buf_len;
 
-			pr_info("buf 0x%lx len %u data off %u len %u\n",
-				(uintptr_t)buf_addr, buf_len, data_off, data_len);
-
 			mbuf = mbufs[m];
 			rte_pktmbuf_attach_extbuf(mbuf, buf_addr,
 						  rte_mem_virt2iova(buf_addr),
 						  buf_len, shinfo);
+			mbuf->buf_len = buf_len;
 			mbuf->data_len = data_len;
 			mbuf->data_off = data_off;
 			mbuf->pkt_len = data_len;
-			
+
 			seg->buf_addr += (uintptr_t)(data_len + data_off);
 			seg->buf_len -= buf_len;
-			pr_info("seg->data_len is %u data_len is %u\n",
-				seg->data_len, data_len);
 			seg->data_len -= data_len;
 			seg->data_off -= data_off;	/* make it 0 */
 
@@ -911,16 +940,22 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 	struct rte_mbuf *mbufs[nb_pkts], *mbuf;
 	int n, i;
 
-	printf("dpdkio_tx ===============\n");
 	for (i = 0, n = 0; n < nb_pkts; n++) {
+#ifdef DEBUG_PKT_TX
+		pr_warn("======== TX ========\n");
+		dpdkio_slot_dump(slots[n]);
+#endif
+
 		mbuf = dpdkio_tx_slot_to_mbuf(portid, slots[n]);
+
+#ifdef DEBUG_PKT_TX
 		rte_pktmbuf_dump(stdout, mbuf, 0);
+#endif
 		if (likely(mbuf)) {
 			mbufs[i] = mbuf;
 			i++;
 		}
 	}
-	printf("=========================\n");
 
 	if (unlikely(i == 0)) {
 		pr_err("0 tx\n");

@@ -458,7 +458,7 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 	/* tx mbuf can be small because packet payload is allocated
 	 * along with sk_buff. It is attached as extmem. */
 	port->tx_mempool = rte_pktmbuf_pool_create(port->tx_mempool_name,
-						   nb_txd << 2, 512, 0,
+						   nb_txd << 3, 512, 0,
 						   64, rte_socket_id());
 	if (!port->tx_mempool) {
 		pr_err("faield to create tx mbuf pool %s: %s\n",
@@ -468,7 +468,7 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 
 	struct rte_eth_txconf txconf = dev_info.default_txconf;
 	txconf.offloads = port_conf.txmode.offloads;
-	txconf.tx_free_thresh = nb_txd >> 1;	/* half of descriptors */
+	//txconf.tx_free_thresh = nb_txd >> 1;	/* half of descriptors */
 	ret = rte_eth_tx_queue_setup(portid, 0, nb_txd, SOCKET_ID_ANY,
 				     &txconf);
 	if (ret < 0) {
@@ -499,7 +499,7 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 	}
 
 	struct rte_eth_rxconf rxconf = dev_info.default_rxconf;
-	rxconf.rx_free_thresh = nb_rxd >> 1;
+	//rxconf.rx_free_thresh = nb_rxd >> 1;
 	rxconf.rx_drop_en = 1;
 	rxconf.offloads = port_conf.rxmode.offloads;
 
@@ -798,6 +798,7 @@ static int dpdkio_rx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 #ifdef DEBUG_PKT_RX
 		pr_warn("======== RX ========\n");
 		rte_pktmbuf_dump(stdout, mbufs[n], 0);
+		printf("\n");
 #endif
 
 		ret = dpdkio_rx_mbuf_to_slot(portid, mbufs[n], slots[i]);
@@ -823,6 +824,11 @@ dpdkio_get_mbuf_shared_info(struct lkl_dpdkio_slot *slot)
 	return (struct rte_mbuf_ext_shared_info *)slot->opaque;
 }
 
+static __always_inline void set_null(volatile void *p)
+{
+	*(volatile __u64 *)p = 0;
+}
+
 static void dpdkio_extmem_free_cb(void *addr, void *opaque)
 {
 	struct lkl_dpdkio_slot *slot = opaque;
@@ -838,8 +844,7 @@ static void dpdkio_extmem_free_cb(void *addr, void *opaque)
 	 */
 
 	lkl_host_ops.dpdkio_ops->free_skb(slot->portid, slot->skb);
-	slot->skb = NULL;
-	__sync_synchronize();
+	set_null(&slot->skb);
 }
 
 static void dpdkio_fill_mbuf_tx_offload(struct lkl_dpdkio_slot *slot,
@@ -1037,6 +1042,7 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 
 #ifdef DEBUG_PKT_TX
 		rte_pktmbuf_dump(stdout, mbuf, 0);
+		printf("\n");
 #endif
 		if (likely(mbuf)) {
 			mbufs[i] = mbuf;

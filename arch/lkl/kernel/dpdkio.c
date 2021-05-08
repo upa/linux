@@ -198,6 +198,7 @@ static void dpdkio_fill_slot_tx_offload(struct sk_buff *skb,
 
 	slot->tso_segsz = 0;
 	slot->eth_protocol = skb->protocol;
+	slot->tx_offload = 0;
 
 	l2 = skb_mac_header(skb);
 	l3 = skb_network_header(skb);
@@ -242,7 +243,7 @@ static struct lkl_dpdkio_slot *dpdkio_get_free_tx_slot(struct dpdkio_dev *dpdk)
 
 	do {
 		s = &dpdk->txslots[txhead];
-		if (READ_ONCE(s->skb) == NULL) {
+		if (!READ_ONCE(s->skb)) {
 			slot = s;
 			break;
 		}
@@ -292,8 +293,8 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 	slot->pkt_len = skb->len;
 	slot->nsegs = skb_shinfo(skb)->nr_frags + 1;
 	if (unlikely(slot->nsegs > LKL_DPDKIO_MAX_SEGS)) {
-		net_err_ratelimited("too many frags %d (> %d)\n",
-				    slot->nsegs, LKL_DPDKIO_MAX_SEGS);
+		pr_err("too many frags %d (> %d)\n",
+		       slot->nsegs, LKL_DPDKIO_MAX_SEGS);
 		goto out_drop;
 	}
 
@@ -379,7 +380,7 @@ static bool dpdkio_recycle_rx_slot(int portid, struct lkl_dpdkio_slot *slot)
 	if (refcount_read(&skb->users) == 1) {
 		/* skb is attached, but it is already consumed. relelase
 		 * skb and associating mbuf */
-		kfree_skb(skb);
+		kfree_skb(slot->skb);
 		slot->skb = NULL;
 
 		if (slot->mbuf) {
@@ -680,7 +681,7 @@ static int dpdkio_init_dev(int port)
 	ret = request_irq(dpdk->irq, dpdkio_handle_irq, 0, netdev_name(dev),
 			  dpdk);
 
-	pr_info("netdev %s nb_rxd=%d nb_txd=%d irq=%d loaded\n",
+	pr_info("%s nb_rxd=%d nb_txd=%d irq=%d loaded\n",
 		netdev_name(dev), nb_txd, nb_rxd, dpdk->irq);
 
 	return ret;

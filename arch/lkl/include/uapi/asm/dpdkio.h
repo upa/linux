@@ -13,8 +13,8 @@ struct lkl_dpdkio_seg {
 
 struct lkl_dpdkio_slot {
 	struct lkl_dpdkio_seg	segs[LKL_DPDKIO_MAX_SEGS]; /* packet  */
-	int			nsegs;		/* number of segs */
-	uint32_t		pkt_len;	/* total packet length */
+	uint16_t		nsegs;		/* number of segs */
+	uint16_t		pkt_len;	/* total packet length */
 
 	void 	*mbuf;	/* pointer to struct mbuf of this packet */
 	void	*skb;	/* pointer to struct sk_buff of this packet */

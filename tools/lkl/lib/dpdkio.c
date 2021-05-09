@@ -85,8 +85,8 @@ struct dpdkio_port {
 	int		irq;		/* rx interrupt number */
 	int		irq_ack_fd;	/* eventfd to receive irq ack */
 	lkl_thread_t	poll_tid;	/* rx polling thread id */
-	int		poll_hup;	/* 1 indicates stopping rx polling */
-	int		poll_enabled;
+	uint8_t		poll_hup;	/* 1 indicates stopping rx polling */
+	uint8_t		poll_enabled;
 
 	/* tx */
 	char		tx_mempool_name[DPDKIO_MEM_NAME_MAX];
@@ -468,7 +468,7 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 
 	struct rte_eth_txconf txconf = dev_info.default_txconf;
 	txconf.offloads = port_conf.txmode.offloads;
-	//txconf.tx_free_thresh = nb_txd >> 1;	/* half of descriptors */
+	txconf.tx_free_thresh = nb_txd >> 1;	/* half of descriptors */
 	ret = rte_eth_tx_queue_setup(portid, 0, nb_txd, SOCKET_ID_ANY,
 				     &txconf);
 	if (ret < 0) {
@@ -503,7 +503,7 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 	rxconf.rx_drop_en = 1;
 	rxconf.offloads = port_conf.rxmode.offloads;
 
-	ret = rte_eth_rx_queue_setup(portid, 0, nb_rxd, SOCKET_ID_ANY,
+	ret = rte_eth_rx_queue_setup(portid, 0, nb_rxd, rte_socket_id(),
 				     &rxconf, port->rx_mempool);
 	if (ret < 0) {
 		pr_err("failed to setup rx queue port %d queue 0: %s\n",
@@ -832,19 +832,13 @@ static __always_inline void set_null(volatile void *p)
 static void dpdkio_extmem_free_cb(void *addr, void *opaque)
 {
 	struct lkl_dpdkio_slot *slot = opaque;
+	int portid = slot->portid;
+	void *skb = slot->skb;
 
-	/* Note, all segments of a mbuf has an identical pointer to a
-	 * shinfo. refcnt of shinfo indicates how many mbufs with
-	 * extmem have reference to the slot and shinfo. dpdk tx
-	 * process decerements refcnt, and if it is 0, there is no
-	 * mbuf with extmem referencing the slot and shinfo. Then
-	 * release skb.
-	 *
-	 * ^- it is changed. chained mbufs is counted as refcnt 1?
-	 */
+	__sync_synchronize();
 
-	lkl_host_ops.dpdkio_ops->free_skb(slot->portid, slot->skb);
-	set_null(&slot->skb);
+	set_null(&slot->skb); /* mark this slot is usable for tx */
+	lkl_host_ops.dpdkio_ops->free_skb(portid, skb);
 }
 
 static void dpdkio_fill_mbuf_tx_offload(struct lkl_dpdkio_slot *slot,
@@ -1137,7 +1131,6 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 
 		mbufs_tx_cnt++;
 	}
-
 
 	ret = rte_eth_tx_burst(portid, 0, mbufs_tx, nb_pkts);
 

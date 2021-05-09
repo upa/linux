@@ -62,20 +62,16 @@ struct dpdkio_dev {
 	 */
 
 	/* tx */
-#define DPDKIO_TX_MAX_BATCH	16
-	uint8_t 		slot_batch_count; /* # of pkts on tx batch */
-	struct lkl_dpdkio_slot	*slot_batch[DPDKIO_TX_MAX_BATCH + 1];
-	/* batch of packet slots to be transmitted */
+	int			tx_irq;		/* tx interrupt number */
 	void			*txlock;
 
 	/* rx */
-	int			irq;		/* rx interrupt number */
-	int			irq_ack_fd;	/* eventfd for ack irq */
+	int			rx_irq;		/* rx interrupt number */
 	struct napi_struct	napi;
 	void			*rxlock;
 
 	/* skb queue to be released */
-	struct lkl_dpdkio_ring free_skb_ring;
+	struct lkl_dpdkio_ring free_tx_slot_ring;
 };
 
 static struct dpdkio_dev *dpdk_devs[MAX_DPDK_PORTS];
@@ -140,7 +136,9 @@ static int dpdkio_open(struct net_device *dev)
 
 	dpdkio_check_link_status(dpdk);
 
-	lkl_ops->dpdkio_ops->enable_rx_interrupt(dpdk->portid);
+	lkl_ops->dpdkio_ops->enable_irq(dpdk->portid, dpdk->tx_irq);
+	lkl_ops->dpdkio_ops->enable_irq(dpdk->portid, dpdk->rx_irq);
+
 	napi_enable(&dpdk->napi);
 
 	return 0;
@@ -155,6 +153,9 @@ static int dpdkio_close(struct net_device *dev)
 	if (ret < 0)
 		return ret;
 
+	lkl_ops->dpdkio_ops->disable_irq(dpdk->portid, dpdk->tx_irq);
+	lkl_ops->dpdkio_ops->disable_irq(dpdk->portid, dpdk->rx_irq);
+
 	napi_disable(&dpdk->napi);
 
 	netif_carrier_off(dev);
@@ -162,26 +163,66 @@ static int dpdkio_close(struct net_device *dev)
 	return 0;
 }
 
-#define MAX_FREE_SKB_BULK_NUM 8
+/**** tx path *****/
 
-static void dpdkio_free_tx_skb(struct dpdkio_dev *dpdk)
+/**** release transmitted slots ****/
+
+static void dpdkio_free_tx_slot(struct dpdkio_dev *dpdk)
 {
-	struct lkl_dpdkio_ring *r = &dpdk->free_skb_ring;
+	struct lkl_dpdkio_ring *r = &dpdk->free_tx_slot_ring;
+	struct net_device *dev = dpdk->dev;
+	struct netdev_queue *txq = netdev_get_tx_queue(dev, 0); /* XXX */
+	struct lkl_dpdkio_slot *slot;
 	struct sk_buff *skb;
-	unsigned int b, n;
+	unsigned int b, n, nr_pkts = 0, nr_bytes = 0;
 
 	b = lkl_dpdkio_ring_read_avail(r);
-	b = b > MAX_FREE_SKB_BULK_NUM ? MAX_FREE_SKB_BULK_NUM : b;
-	if (!b)
-		return;
-
 	for (n = 0; n < b; n++) {
-		skb = r->ptrs[(r->tail + n) & LKL_DPDKIO_RING_MASK];
+		slot = r->ptrs[(r->tail + n) & LKL_DPDKIO_RING_MASK];
+		skb = READ_ONCE(slot->skb);
+
+		nr_bytes += skb->len;
+		nr_pkts++;
+
+		WRITE_ONCE(slot->skb, NULL);
 		dev_kfree_skb_any(skb);
 	}
 
 	lkl_dpdkio_ring_read_next(r, b);
+
+	//netdev_tx_completed_queue(txq, nr_pkts, nr_bytes);
 }
+
+static irqreturn_t dpdkio_handle_tx_irq(int irq, void *data)
+{
+	struct dpdkio_dev *dpdk = data;
+
+	pr_info("1 yey!\n");
+
+	lkl_ops->dpdkio_ops->disable_irq(dpdk->portid, dpdk->tx_irq);
+	pr_info("2 yey!\n");
+	dpdkio_free_tx_slot(dpdk);
+	pr_info("3 yey!\n");
+	lkl_ops->dpdkio_ops->enable_irq(dpdk->portid, dpdk->tx_irq);
+	pr_info("4 yey!\n");
+
+	return IRQ_HANDLED;
+}
+
+static void dpdkio_return_tx_slot(int portid, struct lkl_dpdkio_slot *slot)
+{
+	struct dpdkio_dev *dpdk = dpdkio_dev_get(portid);
+	struct lkl_dpdkio_ring *r = &dpdk->free_tx_slot_ring;
+
+	/* called by dpdkio backend (mbuf extbuf free call back) */
+
+	if (unlikely(lkl_dpdkio_ring_full(r)))
+		panic("tx slot free ring is full on port %d!\n", portid);
+
+	r->ptrs[r->head] = slot;
+	lkl_dpdkio_ring_write_next(r, 1);
+}
+
 
 static void dpdkio_fill_slot_tx_offload(struct sk_buff *skb,
 					struct lkl_dpdkio_slot *slot)
@@ -261,7 +302,6 @@ static struct lkl_dpdkio_slot *dpdkio_get_free_tx_slot(struct dpdkio_dev *dpdk)
 static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 				     struct net_device *dev)
 {
-	struct netdev_queue *txq = skb_get_tx_queue(dev, skb);
 	struct dpdkio_dev *dpdk = netdev_priv(dev);
 	struct skb_frag_struct *frag;
 	struct lkl_dpdkio_slot *slot;
@@ -270,10 +310,9 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 	unsigned short f;
 	int ret;
 
-	lkl_ops->sem_up(dpdk->txlock);
+	pr_info("start\n");
 
-	/* XXX: free TXed skbs. should it be workqueue??? */
-	dpdkio_free_tx_skb(dpdk);
+	lkl_ops->sem_up(dpdk->txlock);
 
 #ifdef DUMP_TX
  	pr_info("\n========== dump tx ==========\n");
@@ -282,7 +321,6 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 
 	slot = dpdkio_get_free_tx_slot(dpdk);
 	if (!slot) {
-		/* slot is not released yet */
 		panic("tx slot is full\n");
 		//dev->stats.tx_dropped++;
 		return NETDEV_TX_BUSY;
@@ -335,32 +373,19 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 	/* set skb to slot to free skb when mbuf is released */
 	slot->skb = skb;
 
-	/* batch the tx packets*/
-	/* append this packet to the end of batch */
-	dpdk->slot_batch[dpdk->slot_batch_count] = slot;
-	dpdk->slot_batch_count++;
-
-
-	/* xmit batched packets */
-
-	if (dpdk->slot_batch_count >= DPDKIO_TX_MAX_BATCH ||
-	    netif_xmit_stopped(txq) || !netdev_xmit_more()) {
-		ret = lkl_ops->dpdkio_ops->tx(dpdk->portid,
-					      dpdk->slot_batch,
-					      dpdk->slot_batch_count);
-		if (unlikely(ret == 0)) {
-			net_err_ratelimited("dpdkio tx failed\n");
-			dev->stats.tx_carrier_errors += dpdk->slot_batch_count;
-		}
-
-		dpdk->slot_batch_count = 0;
-	}
-
+	ret = lkl_ops->dpdkio_ops->enqueue(dpdk->portid, slot);
+	if (unlikely(ret == 0)) {
+		net_err_ratelimited("dpdkio tx failed\n");
+		dev->stats.tx_carrier_errors++;
+	} else
+		pr_info("enqueue a packet\n");
 
 	dev->stats.tx_packets++;
 	dev->stats.tx_bytes += pkt_len;
 
 	lkl_ops->sem_down(dpdk->txlock);
+
+	pr_info("done\n");
 
 	return NETDEV_TX_OK;
 
@@ -373,30 +398,8 @@ out_drop:
 	return NETDEV_TX_OK;
 }
 
-static bool dpdkio_recycle_rx_slot(int portid, struct lkl_dpdkio_slot *slot)
-{
-	struct sk_buff *skb;
 
-	if (slot->skb == NULL)
-		return true;
-
-	skb = slot->skb;
-
-	if (refcount_read(&skb->users) == 1) {
-		/* skb is attached, but it is already consumed. relelase
-		 * skb and associating mbuf */
-		dev_kfree_skb_any(skb);
-		slot->skb = NULL;
-
-		if (slot->mbuf) {
-			lkl_ops->dpdkio_ops->mbuf_free(portid, slot->mbuf);
-			slot->mbuf = NULL;
-		}
-		return true;
-	}
-
-	return false;
-}
+/**** rx path ****/
 
 static void dpdkio_rx_cksum(struct dpdkio_dev *dpdk,
 			    struct lkl_dpdkio_slot *slot, struct sk_buff *skb)
@@ -482,6 +485,31 @@ struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
 	return skb;
 }
 
+static bool dpdkio_recycle_rx_slot(int portid, struct lkl_dpdkio_slot *slot)
+{
+	struct sk_buff *skb;
+
+	if (slot->skb == NULL)
+		return true;
+
+	skb = slot->skb;
+
+	if (refcount_read(&skb->users) == 1) {
+		/* skb is attached, but it is already
+		 * consumed. relelase the skb and associating mbuf */
+		dev_kfree_skb_any(skb);
+		slot->skb = NULL;
+
+		if (slot->mbuf) {
+			lkl_ops->dpdkio_ops->return_rx_mbuf(portid, slot);
+			slot->mbuf = NULL;
+		}
+		return true;
+	}
+
+	return false;
+}
+
 int dpdkio_poll(struct napi_struct *napi, int budget)
 {
 	struct dpdkio_dev *dpdk = container_of(napi, struct dpdkio_dev, napi);
@@ -514,8 +542,9 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 	/* advance rxhead */
 	dpdk->rxhead = (head + 1) & LKL_DPDKIO_SLOT_MASK;
 
-	/* receive packets into `slots` */
-	nr_rx = lkl_ops->dpdkio_ops->rx(dpdk->portid, slots, i);
+	/* dequeue packets into `slots` */
+	nr_rx = lkl_ops->dpdkio_ops->dequeue(dpdk->portid, slots, i);
+	pr_info("dequeue %d packets\n", nr_rx);
 
 	/* build skb */
 	nr_bytes = 0;
@@ -539,22 +568,22 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 	dev->stats.rx_packets += nr_pkts;
 	dev->stats.rx_bytes += nr_bytes;
 
-	/* exit polling mode */
+	/* exit polling mode. enable rx interrupt  */
 	napi_complete_done(napi, nr_pkts);
-	lkl_ops->dpdkio_ops->enable_rx_interrupt(dpdk->portid);
+	lkl_ops->dpdkio_ops->enable_irq(dpdk->portid, dpdk->rx_irq);
 
 	lkl_ops->sem_down(dpdk->rxlock);
 
 	return nr_pkts;
 }
 
-static irqreturn_t dpdkio_handle_irq(int irq, void *data)
+static irqreturn_t dpdkio_handle_rx_irq(int irq, void *data)
 {
 	struct dpdkio_dev *dpdk = data;
 
 	/* disalbe rx irq and ack this itnerrupt */
-	lkl_ops->dpdkio_ops->disable_rx_interrupt(dpdk->portid);
-	lkl_ops->dpdkio_ops->ack_rx_interrupt(dpdk->irq_ack_fd);
+	lkl_ops->dpdkio_ops->disable_irq(dpdk->portid, dpdk->rx_irq);
+	lkl_ops->dpdkio_ops->ack_irq(dpdk->portid, dpdk->rx_irq);
 
 	/* go to napi context */
 	napi_schedule(&dpdk->napi);
@@ -614,7 +643,7 @@ static int dpdkio_init_netdev(struct net_device *dev)
 	return 0;
 }
 
-static int dpdkio_init_dev(int port)
+static int dpdkio_init_dev(int portid)
 {
 
 	struct dpdkio_dev *dpdk;
@@ -622,6 +651,7 @@ static int dpdkio_init_dev(int port)
 	size_t rx_mem_size;
 	int nb_rxd, nb_txd;
 	int ret = 0, n;
+	char irqname[32];
 
 	dev = alloc_etherdev(sizeof(struct dpdkio_dev));
 	if (!dev) {
@@ -632,7 +662,7 @@ static int dpdkio_init_dev(int port)
 	dpdk = netdev_priv(dev);
 	memset(dpdk, 0, sizeof(*dpdk));
 	dpdk->dev = dev;
-	dpdk->portid = port;
+	dpdk->portid = portid;
 	dpdk->txlock = lkl_ops->sem_alloc(1);
 	if (!dpdk->txlock) {
 		pr_err("failed to alloc lkl semaphore\n");
@@ -646,17 +676,18 @@ static int dpdkio_init_dev(int port)
 	}
 
 	for (n = 0; n < LKL_DPDKIO_SLOT_NUM; n++) {
-		dpdk->txslots[n].portid = port;
-		dpdk->rxslots[n].portid = port;
+		dpdk->txslots[n].portid = portid;
+		dpdk->rxslots[n].portid = portid;
 	}
 
-	dpdk_devs[port] = dpdk;
+	dpdk_devs[portid] = dpdk;
 
 	ret = lkl_ops->dpdkio_ops->init_port(dpdk->portid);
 	if (ret < 0) {
 		pr_err("failed to init underlaying dpdkio port\n");
 		goto free_dpdkio;
 	}
+
 
 	/* prepare memory region for receiving packets */
 	for (rx_mem_size = 0; rx_mem_size < LKL_DPDKIO_RX_MEMPOOL_SIZE;) {
@@ -681,44 +712,56 @@ static int dpdkio_init_dev(int port)
 		rx_mem_size += size;
 	}
 
-	ret = lkl_ops->dpdkio_ops->init_rx_irq(dpdk->portid,
-					       &dpdk->irq,
-					       &dpdk->irq_ack_fd);
 
+	/* setup dpdkio backend and netdevice */
 	nb_rxd = LKL_DPDKIO_DESC_NUM;
 	nb_txd = LKL_DPDKIO_DESC_NUM;
 	ret = lkl_ops->dpdkio_ops->setup(dpdk->portid, &nb_rxd, &nb_txd);
 	if (ret < 0)
 		goto free_dpdkio;
 
+	/* initiate irq */
+
+	snprintf(irqname, sizeof(irqname), "dpdkio%d-tx", portid);
+	dpdk->tx_irq = lkl_ops->dpdkio_ops->init_tx_irq(dpdk->portid);
+	if (dpdk->tx_irq < 0) {
+		pr_err("failed to init tx irq\n");
+		goto free_dpdkio;
+	}
+	ret = request_irq(dpdk->tx_irq, dpdkio_handle_tx_irq, 0,
+			  irqname, dpdk);
+	if (ret < 0) {
+		pr_err("failed to request irq for tx\n");
+		goto free_dpdkio;
+	}
+
+	snprintf(irqname, sizeof(irqname), "dpdkio%d-rx", portid);
+	dpdk->rx_irq = lkl_ops->dpdkio_ops->init_rx_irq(dpdk->portid);
+	if (dpdk->rx_irq < 0) {
+		pr_err("failed to init rx irq\n");
+		goto free_dpdkio;
+	}
+	ret = request_irq(dpdk->rx_irq, dpdkio_handle_rx_irq, 0,
+			  irqname, dpdk);
+	if (ret < 0) {
+		pr_err("failed to request irq for rx\n");
+		goto free_dpdkio;
+	}
+
+
+	/* init and register netdev */
 	ret = dpdkio_init_netdev(dev);
 	if (ret < 0)
 		goto free_dpdkio;
 
-	/* init rx irq */
-	ret = request_irq(dpdk->irq, dpdkio_handle_irq, 0, netdev_name(dev),
-			  dpdk);
-
-	pr_info("%s nb_rxd=%d nb_txd=%d irq=%d loaded\n",
-		netdev_name(dev), nb_txd, nb_rxd, dpdk->irq);
+	pr_info("%s nb_rxd=%d nb_txd=%d rx_irq=%d tx_irq=%dloaded\n",
+		netdev_name(dev), nb_txd, nb_rxd, dpdk->rx_irq, dpdk->tx_irq);
 
 	return ret;
 
 free_dpdkio:
 	kfree(dpdk);
 	return ret;
-}
-
-static void dpdkio_free_skb(int portid, void *skb)
-{
-	struct dpdkio_dev *dpdk = dpdkio_dev_get(portid);
-	struct lkl_dpdkio_ring *r = &dpdk->free_skb_ring;
-
-	if (unlikely(lkl_dpdkio_ring_full(r)))
-		panic("skb free ring full on port %d!\n", portid);
-
-	r->ptrs[r->head] = skb;
-	lkl_dpdkio_ring_write_next(r, 1);
 }
 
 static int __init dpdkio_init(void)
@@ -730,7 +773,7 @@ static int __init dpdkio_init(void)
 
 	pr_info("start to init lkl dpdkio\n");
 
-	lkl_ops->dpdkio_ops->free_skb = dpdkio_free_skb;
+	lkl_ops->dpdkio_ops->return_tx_slot = dpdkio_return_tx_slot;
 
 	for (n = 0; n < dpdk_nports; n++) {
 		ret = dpdkio_init_dev(dpdk_ports[n]);

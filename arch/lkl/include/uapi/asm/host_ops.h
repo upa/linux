@@ -28,52 +28,48 @@ struct lkl_dpdkio_ops {
 	 * region is added to the dpdk heap used for pktmbuf pool for
 	 * rx. */
 
-	int (*init_rx_irq)(int portid, int *irq, int *irq_ack_fd);
-	/* an irq number and its eventfd associating the rx on this
-	 * port are passed through `*irq` and `*iqr_ack_fd` */
+	int (*init_tx_irq)(int portid);
+	int (*init_rx_irq)(int portid);
+	/* return irq number for tx/rx */
+
+	void (*enable_irq)(int portid, int irq);
+	void (*disable_irq)(int portid, int irq);
+	void (*ack_irq)(int portid, int irq);
+	/* irq operations */
 
 	int (*setup)(int portid, int *nb_rx_desc, int *nb_tx_desc);
 	/* setup a dpdkio device */
 
-	int (*start)(int portid); /* start dpdkio port */
+	int (*start)(int portid);	/* start dpdkio port */
 	int (*stop)(int portid);	/* stop dpdkio port */
-
-
-	/* RX path */
-
-	int (*rx)(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts);
-	/* receive upto `nb_pkts` packets from the ring to `pkts`
-	 * array. It retruns number of packets received. */
-
-	void (*ack_rx_interrupt)(int irq_ack_fd);
-	void (*enable_rx_interrupt)(int portid);
-	void (*disable_rx_interrupt)(int portid);
-	/* polling is mapped to napi */
-
-	void (*mbuf_free)(int portid, void *mbuf);
-	/* this is actually rte_pktmbuf_free() to release
-	 * dpdkio_slot->mbuf in the RX path. It is called to release
-	 * mbuf when corresponding skb is consumed at the end of RX
-	 * path. */
-
 
 	/* TX path */
 
-	int (*tx)(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts);
-	/* transmit upto `nb_pkts` packets in `pkts` array to a
-	 * underlaying ethernet device. It returns number of packets
-	 * transmitted. */
-
-	void (*free_skb)(int portid, void *skb);
-	/* this is actually kfree_skb to release dpdkio_slot->skb in
-	 * the TX path. It is called to release skb when the
-	 * corresponding mbuf is released at the end of TX path.
-	 *
-	 * NOTE: only this function is set by the lkl kernel-side
-	 * (arch/lkl/kernel/dpdkio.c) 'before' dpdkio_start() is
-	 * called, unlike other functions are set by lib/dpdkio.c.
+	unsigned int (*enqueue)(int portid, struct lkl_dpdkio_slot *slot);
+	/* enqueue upto `nb_pkts` packets in `pkts` array to dpdkio
+	 * backend. Note this function just appends the packets to tx
+	 * ring on the backend.
 	 */
 
+	void (*return_tx_slot)(int portid, struct lkl_dpdkio_slot *slot);
+	/* dpdkio backend returns a transmitted slot to lkl kernel
+	 * through this function. the slot is enqueued to free_tx_slot
+	 * ring at the lkl kernel side. tx_irq triggers lkl kernel to
+	 * start to release the slots.
+	 */
+
+	/* RX path */
+
+	int (*dequeue)(int portid, struct lkl_dpdkio_slot **slots,
+		       unsigned int nb_pkts);
+	/* dequeue upto `nb_pkts` received packets from the dpdkio
+	 * backend to `slots`. */
+
+	void (*return_rx_mbuf)(int portid, void *mbuf);
+	/* lkl kernel returns a received mbuf to dpdkio backend
+	 * through this function. the mbuf is enqueued to free_rx_mbuf
+	 * ring at the dpdkio backend side.
+	 */
 
 	/* misc */
 

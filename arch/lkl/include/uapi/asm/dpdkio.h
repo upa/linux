@@ -105,26 +105,18 @@ static inline void lkl_dpdkio_ring_read_next(struct lkl_dpdkio_ring *r,
 
 static inline unsigned int lkl_dpdkio_ring_write_avail(struct lkl_dpdkio_ring *r)
 {
-	if (r->tail > r->head) {
-		return r->tail - r->head;
-	} if (r->head > r->tail) {
-		return LKL_DPDKIO_RING_MASK - r->head + r->tail + 1;
-	}
-
-	/* ring empty, all slots are avaialble */
-	return LKL_DPDKIO_RING_MASK;
+	int ret = r->tail - r->head;
+	if (ret <= 0)
+		ret += LKL_DPDKIO_RING_SIZE;
+	return ret;
 }
 
 static inline unsigned int lkl_dpdkio_ring_read_avail(struct lkl_dpdkio_ring *r)
 {
-	if (r->head > r->tail) {
-		return r->head - r->tail;
-	} if (r->tail > r->head) {
-		return LKL_DPDKIO_RING_MASK - r->tail + r->head + 1;
-	}
-
-	/* ring empty */
-	return 0;
+	int ret = r->head - r->tail;
+	if (ret < 0)
+		ret += LKL_DPDKIO_RING_SIZE;
+	return ret;
 }
 
 

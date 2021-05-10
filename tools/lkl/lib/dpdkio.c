@@ -104,8 +104,8 @@ struct dpdkio_port {
 	struct lkl_dpdkio_ring	tx_ring; /* ring of lkl_dpdkio_slot for tx */
 	int			tx_clean_count;
 	uint8_t			tx_stop;
-	struct dpdkio_irq	tx_irq;
 	lkl_thread_t		tx_tid;
+	int			tx_kick;	/* eventfd */
 
 	/* mbuf queue to be released */
 	struct lkl_dpdkio_ring free_rx_mbuf;
@@ -282,16 +282,6 @@ static int dpdkio_init_irq(int *irq, int *irq_ack_fd)
 	return irqn;
 }
 
-static int dpdkio_init_tx_irq(int portid)
-{
-	struct dpdkio_port *port = dpdkio_port_get(portid);
-	struct dpdkio_irq *irq = &port->tx_irq;
-
-	/* tx irq, which notifies lkl kernel that there are returned
-	 * tx(ed) stlos. it does not need to wait ack. */
-	return dpdkio_init_irq(&irq->irq, NULL);
-}
-
 static int dpdkio_init_rx_irq(int portid)
 {
 	struct dpdkio_port *port = dpdkio_port_get(portid);
@@ -305,9 +295,7 @@ static struct dpdkio_irq *dpdkio_which_irq(struct dpdkio_port *port,
 {
 	struct dpdkio_irq *irq;
 
-	if (port->tx_irq.irq == _irq)
-		irq = &port->tx_irq;
-	else if (port->rx_irq.irq == _irq)
+	if (port->rx_irq.irq == _irq)
 		irq = &port->rx_irq;
 	else {
 		pr_err("invalid irq number %d\n", _irq);
@@ -458,10 +446,8 @@ static void dpdkio_rx_thread(void *arg)
 		}
 
 		nb_rx = dpdkio_rx(port);
-		a = lkl_dpdkio_ring_read_avail(r);
-			
 
-		if (0 < nb_rx || a) {
+		if (0 < nb_rx) {
 			wait = 0;
 		} else if (nb_rx == 0)
 			wait = (((wait + 1) & 0x0F) | 0x01);
@@ -609,18 +595,7 @@ static int dpdkio_dequeue(int portid, struct lkl_dpdkio_slot **slots,
 static void dpdkio_extmem_free_cb(void *addr, void *opaque)
 {
 	struct lkl_dpdkio_slot *slot = opaque;
-	struct dpdkio_port *port = dpdkio_port_get(slot->portid);
-
 	lkl_host_ops.dpdkio_ops->return_tx_slot(slot->portid, slot);
-
-#define DPDKIO_TX_CLEAN_COUNT_FOR_IRQ	16
-
-	port->tx_clean_count++;
-	if (port->tx_clean_count > DPDKIO_TX_CLEAN_COUNT_FOR_IRQ &&
-	    dpdkio_is_irq_enabled(&port->tx_irq)) {
-		dpdkio_deliver_irq(&port->tx_irq);
-		port->tx_clean_count = 0;
-	}
 }
 
 /**** tx packets ****/
@@ -739,39 +714,29 @@ static void dpdkio_tx_thread(void *arg)
 	struct lkl_dpdkio_slot *slots[LKL_DPDKIO_MAX_BURST];
 	struct dpdkio_port *port = arg;
 	struct lkl_dpdkio_ring *r = &port->tx_ring;
-	unsigned int n, b, a, wait = 0;
+	unsigned int n, b, a;
+	unsigned long v;
+	int ret;
 
 	/* transmit packets on tx_ring */
 
 	do {
-		if (unlikely(port->tx_stop)) {
-			dpdkio_delay_us_sleep(1000);
-			continue;
+
+		ret = read(port->tx_kick, &v, sizeof(v));
+		if (unlikely(ret < 0)) {
+			pr_err("tx eventfd read failed, fd=%d: %s\n",
+			       port->tx_kick, strerror(errno));
+			assert(0);
 		}
 
 		a = lkl_dpdkio_ring_read_avail(r);
 		b = min(a, LKL_DPDKIO_MAX_BURST);
 
-#if 1
-		if (0 < b)
-			wait = 0;
-		else if (b == 0)
-			wait = (((wait + 1) & 0x0F) | 0x01);
-
-		if (wait > 0) {
-			dpdkio_delay_us_sleep(wait);
-			continue;
-		}
-#else
-		/* busy loop */
-		if (b == 0)
-			continue;
-#endif
-		/* there are pending packets on the tx_ring */
 		for (n = 0; n < b; n++) {
 			slots[n] = r->ptrs[((r->tail + n) &
 					    LKL_DPDKIO_RING_MASK)];
 		}
+
 		dpdkio_tx(port->portid, slots, b);
 		lkl_dpdkio_ring_read_next(r, b);
 
@@ -800,6 +765,16 @@ static unsigned int dpdkio_enqueue(int portid, struct lkl_dpdkio_slot *slot)
 	return 1;
 }
 
+static void dpdkio_kick_tx_queue(int portid)
+{
+	struct dpdkio_port *port = dpdkio_port_get(portid);
+	unsigned long v = 1;
+	int ret;
+
+	ret = write(port->tx_kick, &v, sizeof(v));
+	if (unlikely(ret < 0))
+		pr_err("tx eventfd write failed\n");
+}
 
 /**** port initialization, setup, start, and stop ****/
 
@@ -949,6 +924,13 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 	uint16_t nb_txd = *nb_tx_desc;
 	uint16_t nb_rxd = *nb_rx_desc;
 	int ret;
+
+	/* prepare a eventfd for tx kick */
+	port->tx_kick = eventfd(0, EFD_CLOEXEC);
+	if (port->tx_kick < 0) {
+		pr_err("failed to create eventfd for tx kick\n");
+		return port->tx_kick;
+	}
 
 	if (*nb_tx_desc < 1 || *nb_rx_desc < 1) {
 		pr_err("invalid number of desc tx=%d rx=%d\n",
@@ -1188,7 +1170,6 @@ struct lkl_dpdkio_ops dpdkio_ops = {
 	.init_port		= dpdkio_init_port,
 	.add_rx_region		= dpdkio_add_rx_region,
 
-	.init_tx_irq		= dpdkio_init_tx_irq,
 	.init_rx_irq		= dpdkio_init_rx_irq,
 	.enable_irq		= dpdkio_enable_irq,
 	.disable_irq		= dpdkio_disable_irq,
@@ -1202,6 +1183,7 @@ struct lkl_dpdkio_ops dpdkio_ops = {
 	.return_rx_mbuf		= dpdkio_return_rx_mbuf,
 
 	.enqueue		= dpdkio_enqueue,
+	.kick_tx_queue		= dpdkio_kick_tx_queue,
 	.return_tx_slot		= NULL,	/* filled by lkl/kernel/dpdkio.c */
 
 	.get_macaddr		= dpdkio_get_macaddr,

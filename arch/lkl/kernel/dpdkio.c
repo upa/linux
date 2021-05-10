@@ -62,7 +62,6 @@ struct dpdkio_dev {
 	 */
 
 	/* tx */
-	int			tx_irq;		/* tx interrupt number */
 	void			*txlock;
 
 	/* rx */
@@ -136,7 +135,6 @@ static int dpdkio_open(struct net_device *dev)
 
 	dpdkio_check_link_status(dpdk);
 
-	lkl_ops->dpdkio_ops->enable_irq(dpdk->portid, dpdk->tx_irq);
 	lkl_ops->dpdkio_ops->enable_irq(dpdk->portid, dpdk->rx_irq);
 
 	napi_enable(&dpdk->napi);
@@ -153,7 +151,6 @@ static int dpdkio_close(struct net_device *dev)
 	if (ret < 0)
 		return ret;
 
-	lkl_ops->dpdkio_ops->disable_irq(dpdk->portid, dpdk->tx_irq);
 	lkl_ops->dpdkio_ops->disable_irq(dpdk->portid, dpdk->rx_irq);
 
 	napi_disable(&dpdk->napi);
@@ -191,17 +188,6 @@ static void dpdkio_free_tx_slot(struct dpdkio_dev *dpdk)
 	lkl_dpdkio_ring_read_next(r, b);
 
 	//netdev_tx_completed_queue(txq, nr_pkts, nr_bytes);
-}
-
-static irqreturn_t dpdkio_handle_tx_irq(int irq, void *data)
-{
-	struct dpdkio_dev *dpdk = data;
-
-	lkl_ops->dpdkio_ops->disable_irq(dpdk->portid, dpdk->tx_irq);
-	dpdkio_free_tx_slot(dpdk);
-	lkl_ops->dpdkio_ops->enable_irq(dpdk->portid, dpdk->tx_irq);
-
-	return IRQ_HANDLED;
 }
 
 static void dpdkio_return_tx_slot(int portid, struct lkl_dpdkio_slot *slot)
@@ -307,6 +293,8 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 
 	lkl_ops->sem_up(dpdk->txlock);
 
+	dpdkio_free_tx_slot(dpdk);
+
 #ifdef DUMP_TX
  	pr_info("\n========== dump tx ==========\n");
 	skb_dump(KERN_WARNING, skb, false);
@@ -371,6 +359,8 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 		net_err_ratelimited("dpdkio tx failed\n");
 		dev->stats.tx_carrier_errors++;
 	}
+
+	lkl_ops->dpdkio_ops->kick_tx_queue(dpdk->portid);
 
 	dev->stats.tx_packets++;
 	dev->stats.tx_bytes += pkt_len;
@@ -710,20 +700,6 @@ static int dpdkio_init_dev(int portid)
 		goto free_dpdkio;
 
 	/* initiate irq */
-
-	snprintf(irqname, sizeof(irqname), "dpdkio%d-tx", portid);
-	dpdk->tx_irq = lkl_ops->dpdkio_ops->init_tx_irq(dpdk->portid);
-	if (dpdk->tx_irq < 0) {
-		pr_err("failed to init tx irq\n");
-		goto free_dpdkio;
-	}
-	ret = request_irq(dpdk->tx_irq, dpdkio_handle_tx_irq, 0,
-			  irqname, dpdk);
-	if (ret < 0) {
-		pr_err("failed to request irq for tx\n");
-		goto free_dpdkio;
-	}
-
 	snprintf(irqname, sizeof(irqname), "dpdkio%d-rx", portid);
 	dpdk->rx_irq = lkl_ops->dpdkio_ops->init_rx_irq(dpdk->portid);
 	if (dpdk->rx_irq < 0) {
@@ -743,8 +719,8 @@ static int dpdkio_init_dev(int portid)
 	if (ret < 0)
 		goto free_dpdkio;
 
-	pr_info("%s nb_rxd=%d nb_txd=%d rx_irq=%d tx_irq=%dloaded\n",
-		netdev_name(dev), nb_txd, nb_rxd, dpdk->rx_irq, dpdk->tx_irq);
+	pr_info("%s nb_rxd=%d nb_txd=%d rx_irq=%d loaded\n",
+		netdev_name(dev), nb_txd, nb_rxd, dpdk->rx_irq);
 
 	return ret;
 

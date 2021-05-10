@@ -28,9 +28,8 @@ struct lkl_dpdkio_ops {
 	 * region is added to the dpdk heap used for pktmbuf pool for
 	 * rx. */
 
-	int (*init_tx_irq)(int portid);
 	int (*init_rx_irq)(int portid);
-	/* return irq number for tx/rx */
+	/* return irq number for rx */
 
 	void (*enable_irq)(int portid, int irq);
 	void (*disable_irq)(int portid, int irq);
@@ -50,6 +49,8 @@ struct lkl_dpdkio_ops {
 	 * backend. Note this function just appends the packets to tx
 	 * ring on the backend.
 	 */
+
+	void (*kick_tx_queue)(int portid);
 
 	void (*return_tx_slot)(int portid, struct lkl_dpdkio_slot *slot);
 	/* dpdkio backend returns a transmitted slot to lkl kernel

@@ -761,6 +761,7 @@ static void dpdkio_mbuf_free(int portid, void *mbuf)
 	}
 
 	r->ptrs[r->head] = mbuf;
+	__sync_synchronize();
 	lkl_dpdkio_ring_write_next(r, 1);
 }
 

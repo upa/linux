@@ -81,31 +81,49 @@ struct lkl_dpdkio_ring {
 };
 /* XXX: needs lock? there are only a reader and a writer */
 
+#ifdef __KERNEL__
+#define __wb wmb
+#define __rb rmb
+#define __mb mb
+
+#else	/* gcc*/
+
+#define __wb __sync_synchronize
+#define __rb __sync_synchronize
+#define __mb __sync_synchronize
+#endif
+
 static inline int lkl_dpdkio_ring_emtpy(struct lkl_dpdkio_ring *r)
 {
+	__wb();
 	return (r->head == r->tail) ? 1 : 0;
 }
 
 static inline int lkl_dpdkio_ring_full(struct lkl_dpdkio_ring *r)
 {
+	__wb();
 	return (((r->head + 1) & LKL_DPDKIO_RING_MASK) == r->tail) ? 1: 0;
 }
 
 static inline void lkl_dpdkio_ring_write_next(struct lkl_dpdkio_ring *r,
 					  unsigned int n)
 {
+	__wb();
 	r->head = (r->head + n) & LKL_DPDKIO_RING_MASK;
 }
 
 static inline void lkl_dpdkio_ring_read_next(struct lkl_dpdkio_ring *r,
 					 unsigned int n)
 {
+	__wb();
 	r->tail = (r->tail + n) & LKL_DPDKIO_RING_MASK;
 }
 
 static inline unsigned int lkl_dpdkio_ring_write_avail(struct lkl_dpdkio_ring *r)
 {
-	int ret = r->tail - r->head;
+	int ret;
+	__wb();
+	ret = r->tail - r->head;
 	if (ret <= 0)
 		ret += LKL_DPDKIO_RING_SIZE;
 	return ret;
@@ -113,7 +131,9 @@ static inline unsigned int lkl_dpdkio_ring_write_avail(struct lkl_dpdkio_ring *r
 
 static inline unsigned int lkl_dpdkio_ring_read_avail(struct lkl_dpdkio_ring *r)
 {
-	int ret = r->head - r->tail;
+	int ret;
+	__wb();
+	ret = r->head - r->tail;
 	if (ret < 0)
 		ret += LKL_DPDKIO_RING_SIZE;
 	return ret;

@@ -197,14 +197,9 @@ static irqreturn_t dpdkio_handle_tx_irq(int irq, void *data)
 {
 	struct dpdkio_dev *dpdk = data;
 
-	pr_info("1 yey!\n");
-
 	lkl_ops->dpdkio_ops->disable_irq(dpdk->portid, dpdk->tx_irq);
-	pr_info("2 yey!\n");
 	dpdkio_free_tx_slot(dpdk);
-	pr_info("3 yey!\n");
 	lkl_ops->dpdkio_ops->enable_irq(dpdk->portid, dpdk->tx_irq);
-	pr_info("4 yey!\n");
 
 	return IRQ_HANDLED;
 }
@@ -310,8 +305,6 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 	unsigned short f;
 	int ret;
 
-	pr_info("start\n");
-
 	lkl_ops->sem_up(dpdk->txlock);
 
 #ifdef DUMP_TX
@@ -377,15 +370,12 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 	if (unlikely(ret == 0)) {
 		net_err_ratelimited("dpdkio tx failed\n");
 		dev->stats.tx_carrier_errors++;
-	} else
-		pr_info("enqueue a packet\n");
+	}
 
 	dev->stats.tx_packets++;
 	dev->stats.tx_bytes += pkt_len;
 
 	lkl_ops->sem_down(dpdk->txlock);
-
-	pr_info("done\n");
 
 	return NETDEV_TX_OK;
 
@@ -501,7 +491,7 @@ static bool dpdkio_recycle_rx_slot(int portid, struct lkl_dpdkio_slot *slot)
 		slot->skb = NULL;
 
 		if (slot->mbuf) {
-			lkl_ops->dpdkio_ops->return_rx_mbuf(portid, slot);
+			lkl_ops->dpdkio_ops->return_rx_mbuf(portid, slot->mbuf);
 			slot->mbuf = NULL;
 		}
 		return true;
@@ -544,7 +534,6 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 
 	/* dequeue packets into `slots` */
 	nr_rx = lkl_ops->dpdkio_ops->dequeue(dpdk->portid, slots, i);
-	pr_info("dequeue %d packets\n", nr_rx);
 
 	/* build skb */
 	nr_bytes = 0;

@@ -383,8 +383,8 @@ static bool dpdkio_recycle_rx_slot(int portid, struct lkl_dpdkio_slot *slot)
 	skb = slot->skb;
 
 	if (refcount_read(&skb->users) == 1) {
-		/* skb is attached, but it is already consumed. relelase
-		 * skb and associating mbuf */
+		/* skb is attached, but it is already
+		 * consumed. release the skb and associating mbuf */
 		dev_kfree_skb_any(skb);
 		slot->skb = NULL;
 
@@ -664,7 +664,7 @@ static int dpdkio_init_dev(int port)
 		struct page *page;
 		void *mem;
 
-		page = alloc_pages(GFP_KERNEL, MAX_ORDER - 1);
+		page = dev_alloc_pages(MAX_ORDER - 1);
 		if (!page) {
 			pr_err("failed to alloc %lu-bytes pages \n", size);
 			goto free_dpdkio;
@@ -718,6 +718,7 @@ static void dpdkio_free_skb(int portid, void *skb)
 		panic("skb free ring full on port %d!\n", portid);
 
 	r->ptrs[r->head] = skb;
+	wmb();
 	lkl_dpdkio_ring_write_next(r, 1);
 }
 

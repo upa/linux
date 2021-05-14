@@ -134,9 +134,6 @@ static char *ealargs[] = {
 	"-c", "1",
 	"-n", "1",
 	"--iova-mode", "va",
-	"-w",
-	"09:00.0,rx_vec_en=0,rxq_cqe_comp_en=0,tx_vec_en=0,"
-	"txq_mpw_en=0,rxq_cqe_comp_en=0,dv_xmeta_en=0",
 //	"--log-level", "*:debug",
 };
 #endif

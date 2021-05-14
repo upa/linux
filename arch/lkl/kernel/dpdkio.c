@@ -373,21 +373,26 @@ out_drop:
 	return NETDEV_TX_OK;
 }
 
+#define dpdkio_seg_to_page(s) pfn_to_page((s)->buf_addr >> PAGE_SHIFT)
+
+static inline int dpdkio_can_recycle_rx_slot(struct lkl_dpdkio_slot *slot)
+{
+	struct page *page;
+	int n;
+
+	for (n = 0; n < slot->nsegs; n++) {
+		page = dpdkio_seg_to_page(&slot->segs[n]);
+		if (page_ref_count(page) > 1)
+			return 0;
+	}
+
+	/* all pages are refcnt 1 */
+	return 1;
+}
+
 static bool dpdkio_recycle_rx_slot(int portid, struct lkl_dpdkio_slot *slot)
 {
-	struct sk_buff *skb;
-
-	if (slot->skb == NULL)
-		return true;
-
-	skb = slot->skb;
-
-	if (refcount_read(&skb->users) == 1) {
-		/* skb is attached, but it is already
-		 * consumed. release the skb and associating mbuf */
-		dev_kfree_skb_any(skb);
-		slot->skb = NULL;
-
+	if (dpdkio_can_recycle_rx_slot(slot)) {
 		if (slot->mbuf) {
 			lkl_ops->dpdkio_ops->mbuf_free(portid, slot->mbuf);
 			slot->mbuf = NULL;
@@ -418,9 +423,18 @@ struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
 {
 
 	struct sk_buff *skb;
+	struct page *page;
 	unsigned int gso_type = 0;
 	uint32_t truesize;
 	int n;
+
+	/* Note increment ref_count of rx pages. the initial value of
+	 * rx pages (allocated by dev_alloc_page()) is 1. After rx and
+	 * before building skb on the pages, we increment the
+	 * rec_count and then it is 2. consuming the packet
+	 * (kfree_skb) decrements the count to 1. Thus, page_ref_count
+	 * is 1 means the rx buffer is available.
+	 */
 
 	/* build an skb to around the first segment
 	 * XXX: really there is tail room for shared_info?
@@ -431,15 +445,11 @@ struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
 	if (!skb)
 		return NULL;
 
+	page = dpdkio_seg_to_page(&slot->segs[0]);
+	page_ref_inc(page);
+
 	skb_reserve(skb, slot->segs[0].data_off);
 	__skb_put(skb, slot->segs[0].data_len);
-
-	/* Note, increment refcnt of skb. By this trick, skb is not
-	 * free()ed after a socket and other consumes this skb. They
-	 * calls kfree_skb(), and it calls skb_unref(), and then it
-	 * decrements the refcnt of skb. So, we can determine the skb
-	 * (and associating mbuf) can be freed if refcnt is 1 */
-	skb_get(skb);
 
 	for (n = 1; n < slot->nsegs; n++) {
 		struct lkl_dpdkio_seg *seg;
@@ -450,6 +460,7 @@ struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
 		/* Note: in lkl, va = pa (asm-generic/io.h and
 		 * page.h), so there is no need to use
 		 * phys_to_virt. */
+		page_ref_inc(page);
 
 		skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, page,
 				seg->data_off, seg->data_len, seg->buf_len);
@@ -619,7 +630,6 @@ static int dpdkio_init_dev(int port)
 
 	struct dpdkio_dev *dpdk;
 	struct net_device *dev;
-	size_t rx_mem_size;
 	int nb_rxd, nb_txd;
 	int ret = 0, n;
 
@@ -658,27 +668,24 @@ static int dpdkio_init_dev(int port)
 		goto free_dpdkio;
 	}
 
-	/* prepare memory region for receiving packets */
-	for (rx_mem_size = 0; rx_mem_size < LKL_DPDKIO_RX_MEMPOOL_SIZE;) {
-		size_t size = MAX_ORDER_NR_PAGES * PAGE_SIZE;
+	/* prepare pages for receiving packets */
+	for (n = 0; n < LKL_DPDKIO_RX_PAGE_NUM; n++) {
 		struct page *page;
 		void *mem;
 
-		page = dev_alloc_pages(MAX_ORDER - 1);
+		page = dev_alloc_page();
 		if (!page) {
-			pr_err("failed to alloc %lu-bytes pages \n", size);
+			pr_err("failed to alloc rx pages \n");
 			goto free_dpdkio;
 		}
 
 		mem = page_address(page);
-		ret = lkl_ops->dpdkio_ops->add_rx_region(dpdk->portid,
-							 (uintptr_t)mem, size);
+		ret = lkl_ops->dpdkio_ops->add_rx_page(dpdk->portid,
+						       (uintptr_t)mem);
 		if (ret) {
 			pr_err("failed to add rx mem region\n");
 			goto free_dpdkio;
 		}
-
-		rx_mem_size += size;
 	}
 
 	ret = lkl_ops->dpdkio_ops->init_rx_irq(dpdk->portid,

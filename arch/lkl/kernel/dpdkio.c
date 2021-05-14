@@ -375,7 +375,7 @@ out_drop:
 
 #define dpdkio_seg_to_page(s) pfn_to_page((s)->buf_addr >> PAGE_SHIFT)
 
-static inline int dpdkio_can_recycle_rx_slot(struct lkl_dpdkio_slot *slot)
+static inline bool dpdkio_can_recycle_rx_slot(struct lkl_dpdkio_slot *slot)
 {
 	struct page *page;
 	int n;
@@ -383,11 +383,11 @@ static inline int dpdkio_can_recycle_rx_slot(struct lkl_dpdkio_slot *slot)
 	for (n = 0; n < slot->nsegs; n++) {
 		page = dpdkio_seg_to_page(&slot->segs[n]);
 		if (page_ref_count(page) > 1)
-			return 0;
+			return false;
 	}
 
 	/* all pages are refcnt 1 */
-	return 1;
+	return true;
 }
 
 static bool dpdkio_recycle_rx_slot(int portid, struct lkl_dpdkio_slot *slot)
@@ -456,10 +456,7 @@ struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
 		struct page *page;
 
 		seg = &slot->segs[n];
-		page = pfn_to_page(seg->buf_addr >> PAGE_SHIFT);
-		/* Note: in lkl, va = pa (asm-generic/io.h and
-		 * page.h), so there is no need to use
-		 * phys_to_virt. */
+		page = dpdkio_seg_to_page(seg);
 		page_ref_inc(page);
 
 		skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, page,
@@ -493,6 +490,28 @@ struct sk_buff *dpdkio_rx_slot_to_skb(struct dpdkio_dev *dpdk,
 	return skb;
 }
 
+static void dpdkio_dump_rx_slots(struct dpdkio_dev *dpdk)
+{
+	struct lkl_dpdkio_slot *slot;
+	uint32_t head;
+	int n, i;
+
+	head = dpdk->rxhead;
+	for (n = 0; n < LKL_DPDKIO_SLOT_NUM; n++) {
+		slot = &dpdk->rxslots[head];
+		pr_info("slot[%u]\n", head);
+
+		for (i = 0; i < slot->nsegs; i++) {
+			struct lkl_dpdkio_seg *s = &slot->segs[i];
+			printk("seg=%d refcnt=%u 0x%lx", i,
+			       page_ref_count(dpdkio_seg_to_page(s)),
+			       s->buf_addr);
+		}
+
+		head = (head + 1) & LKL_DPDKIO_SLOT_MASK;
+	}
+}
+
 int dpdkio_poll(struct napi_struct *napi, int budget)
 {
 	struct dpdkio_dev *dpdk = container_of(napi, struct dpdkio_dev, napi);
@@ -519,8 +538,10 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 		head = (head + 1) & LKL_DPDKIO_SLOT_MASK;
 	}
 
-	if (unlikely(i == 0))
+	if (unlikely(i == 0)) {
+		dpdkio_dump_rx_slots(dpdk);
 		panic("no free rx slots\n");
+	}
 
 	/* advance rxhead */
 	dpdk->rxhead = (head + 1) & LKL_DPDKIO_SLOT_MASK;
@@ -692,8 +713,8 @@ static int dpdkio_init_dev(int port)
 					       &dpdk->irq,
 					       &dpdk->irq_ack_fd);
 
-	nb_rxd = LKL_DPDKIO_DESC_NUM;
-	nb_txd = LKL_DPDKIO_DESC_NUM;
+	nb_rxd = LKL_DPDKIO_RX_DESC_NUM;
+	nb_txd = LKL_DPDKIO_TX_DESC_NUM;
 	ret = lkl_ops->dpdkio_ops->setup(dpdk->portid, &nb_rxd, &nb_txd);
 	if (ret < 0)
 		goto free_dpdkio;

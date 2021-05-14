@@ -50,7 +50,7 @@ struct lkl_dpdkio_slot {
 
 #define LKL_DPDKIO_PAGE_SIZE		4096
 
-#define LKL_DPDKIO_SLOT_NUM		512	/* must be power of 2*/
+#define LKL_DPDKIO_SLOT_NUM		1024	/* must be power of 2*/
 #define LKL_DPDKIO_SLOT_MASK		(LKL_DPDKIO_SLOT_NUM - 1)
 /* Note that a lkl_dpdkio_slot represents a packet including multiple
  * segments. Thus, the numbers of mbufs on tx/rx mempool must be
@@ -58,11 +58,9 @@ struct lkl_dpdkio_slot {
  (LKL_DPDKIO_SLOT_NUM x LKL_DPDKIO_MAX_SEGS). */
 
 
-#define LKL_DPDKIO_DESC_NUM		512
-#define LKL_DPDKIO_RX_PAGE_NUM		4096
-/* RX_PAGE_NUM is calculated from: 256 x (65536 / 4096). 256 is the
- * half of desc, and 65536 is LRO max size. */
-
+#define LKL_DPDKIO_TX_DESC_NUM		512
+#define LKL_DPDKIO_RX_DESC_NUM		1024
+#define LKL_DPDKIO_RX_PAGE_NUM		8192
 
 /* tools/lkl/lib/dpdkio.c */
 int lkl_dpdkio_init(int argc, char **argv);

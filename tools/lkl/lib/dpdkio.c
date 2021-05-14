@@ -45,6 +45,8 @@ int lkl_dpdkio_exit(void)
 
 //#define DEBUG_PKT_TX
 //#define DEBUG_PKT_RX
+//#define DEBUG_STATS
+//#define DEBUG_PCAP
 
 /* lkl_dpdkio_init()
  *
@@ -90,8 +92,9 @@ struct dpdkio_port {
 	uint8_t		poll_enabled;
 
 	/* tx */
-	char		tx_mempool_name[DPDKIO_MEM_NAME_MAX];
+	char			tx_mempool_name[DPDKIO_MEM_NAME_MAX];
 	struct rte_mempool	*tx_mempool;
+	unsigned long	txed;
 
 	/* mbuf queue to be released */
 	struct lkl_dpdkio_ring free_mbuf_ring;
@@ -182,8 +185,8 @@ static int pcap_write_packet(int fd, struct lkl_dpdkio_seg *segs, int nsegs)
 	}
 
 	for (n = 0; n < nsegs; n++) {
-		void *addr = (void *)(segs[n].buf_addr + data_off);
-		ret = write(fd, addr, data_len);
+		void *addr = (void *)(segs[n].buf_addr + segs[n].data_off);
+		ret = write(fd, addr, segs[n].data_len);
 		if (ret < 0) {
 			fprintf(stderr, "failed to write a packet: %s\n",
 				strerror(errno));
@@ -527,9 +530,36 @@ static void dpdkio_stop_rx_poll_thread(int portid)
 	__sync_synchronize();
 }
 
+#ifdef DEBUG_STATS
+static void dpdkio_eth_stats_thread(void *arg)
+{
+	struct dpdkio_port *port = arg;
+	struct rte_eth_stats s;
+
+	while (1) {
+		rte_eth_stats_get(port->portid, &s);
+		printf("======== stats ========\n");
+		printf("rx pkts:        %lu\n", s.ipackets);
+		printf("tx pkts:        %lu\n", s.opackets);
+		printf("rx missed pkts: %lu\n", s.imissed);
+		printf("rx err pkts:    %lu\n", s.ierrors);
+		printf("tx err pkts:    %lu\n", s.ierrors);
+		printf("rx err mbufs:   %lu\n", s.rx_nombuf);
+		printf("txburst pkts:   %lu\n", port->txed);
+		sleep(1);
+	}
+}
+#endif
+
 static int dpdkio_start(int portid)
 {
 	int ret;
+
+#ifdef DEBUG_STATS
+	lkl_thread_t tid;
+	tid = lkl_host_ops.thread_create(dpdkio_eth_stats_thread,
+					 dpdkio_port_get(portid));
+#endif
 
 	ret = rte_eth_dev_start(portid);
 	if (ret < 0) {
@@ -713,15 +743,13 @@ static int dpdkio_rx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 	nb_rx = rte_eth_rx_burst(portid, 0, mbufs, nb_pkts);
 
 	for (i = 0, n = 0; n < nb_rx; n++) {
-#ifdef DEBUG_PKT_RX
-		pr_warn("======== RX ========\n");
-		rte_pktmbuf_dump(stdout, mbufs[n], 0);
-		printf("\n");
-#endif
 
 		ret = dpdkio_rx_mbuf_to_slot(portid, mbufs[n], slots[i]);
 
 #ifdef DEBUG_PKT_RX
+		pr_warn("======== RX ========\n");
+		rte_pktmbuf_dump(stdout, mbufs[n], 0);
+		printf("\n");
 		dpdkio_slot_dump(slots[i]);
 #endif
 
@@ -771,124 +799,16 @@ static void dpdkio_fill_mbuf_tx_offload(struct lkl_dpdkio_slot *slot,
 
 	if (slot->ip_protocol == IPPROTO_TCP) {
 		mbuf->ol_flags |= PKT_TX_TCP_CKSUM;
+		mbuf->l2_len = slot->l2_len;
+		mbuf->l3_len = slot->l3_len;
+		mbuf->l4_len = slot->l4_len;
 
 		if (slot->nsegs > 1) {
 			mbuf->ol_flags |= PKT_TX_TCP_SEG;
-			mbuf->l2_len = slot->l2_len;
-			mbuf->l3_len = slot->l3_len;
-			mbuf->l4_len = slot->l4_len;
 			mbuf->tso_segsz = slot->tso_segsz;
 		}
 	}
 }
-
-
-
-
-#if 0
-#define PAGE_SIZE	4096
-
-static inline void dpdkio_pull_page_size_headroom(struct lkl_dpdkio_seg *seg)
-{
-	/* pull headroom larger than PAGE_SIZE */
-	while (seg->data_off >= PAGE_SIZE) {
-		seg->buf_addr += PAGE_SIZE;
-		seg->buf_len -= PAGE_SIZE;
-		seg->data_off -= PAGE_SIZE;
-	}
-}
-
-/* This function aligns packet to 4k-byte mbufs */
-static struct rte_mbuf *dpdkio_tx_slot_to_mbuf(int portid,
-					       struct lkl_dpdkio_slot *slot)
-{
-#define MAX_NB_MBUFS 20
-	struct dpdkio_port *port = dpdkio_port_get(portid);
-	struct rte_mbuf_ext_shared_info *shinfo;
-	struct rte_mbuf *mbufs[MAX_NB_MBUFS], *mbuf;
-	struct lkl_dpdkio_seg *seg;
-	int nb_mbufs, n, ret, m;
-	void *buf_addr;
-
-	nb_mbufs = 0;
-	for (n = 0; n < slot->nsegs; n++) {
-		seg = &slot->segs[n];
-		dpdkio_pull_page_size_headroom(seg);
-		int data_size = seg->data_len + seg->data_off;
-		while (data_size > 0) {
-			nb_mbufs++;
-			data_size -= PAGE_SIZE;
-		};
-	}
-
-	if (unlikely(nb_mbufs > MAX_NB_MBUFS)) {
- 		pr_err("too many (%d) mbufs required!\n", nb_mbufs);
-		return NULL;
-	}
-
-	ret = rte_pktmbuf_alloc_bulk(port->tx_mempool, mbufs, nb_mbufs);
-	if (unlikely(ret < 0)) {
-		pr_err("failed to alloc mbuf!!\n");
-		return NULL;
-	}
-
-	shinfo = dpdkio_get_mbuf_shared_info(slot);
-	shinfo->free_cb = dpdkio_extmem_free_cb;
-	shinfo->fcb_opaque = slot;
-	rte_mbuf_ext_refcnt_set(shinfo, 1);
-
-	m = 0;
-	for (n = 0; n < slot->nsegs; n++) {
-		seg = &slot->segs[n];
-
-		while (seg->data_len > 0) {
-			buf_addr = (void *)seg->buf_addr;
-			unsigned int data_off = seg->data_off;
-			unsigned int data_len;
-			unsigned int buf_len;
-
-			if (data_off + seg->data_len > PAGE_SIZE)
-				data_len = PAGE_SIZE - data_off;
-			else
-				data_len = seg->data_len;
-
-			if (seg->buf_len > PAGE_SIZE)
-				buf_len = PAGE_SIZE;
-			else
-				buf_len = seg->buf_len;
-
-			mbuf = mbufs[m];
-			rte_pktmbuf_attach_extbuf(mbuf, buf_addr,
-						  rte_mem_virt2iova(buf_addr),
-						  buf_len, shinfo);
-			mbuf->buf_len = buf_len;
-			mbuf->data_len = data_len;
-			mbuf->data_off = data_off;
-			mbuf->pkt_len = data_len;
-
-			seg->buf_addr += (uintptr_t)(data_len + data_off);
-			seg->buf_len -= buf_len;
-			seg->data_len -= data_len;
-			seg->data_off -= data_off;	/* make it 0 */
-
-			if (m > 0) {
-				ret = rte_pktmbuf_chain(mbufs[0], mbuf);
-				if (unlikely(ret < 0)) {
-					pr_err("mbuf chain failed\n");
-					assert(0);
-				}
-			}
-
-			m++;
-		}
-	}
-
-	dpdkio_fill_mbuf_tx_offload(slot, mbufs[0]);
-
-	return mbufs[0];
-}
-
-#else
 
 static struct rte_mbuf *dpdkio_tx_slot_to_mbuf(int portid,
 					       struct lkl_dpdkio_slot *slot)
@@ -935,25 +855,28 @@ static struct rte_mbuf *dpdkio_tx_slot_to_mbuf(int portid,
 	return mbufs[0];
 }
 
-#endif
-
 static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 {
 	struct rte_mbuf *mbufs[LKL_DPDKIO_MAX_BURST], *mbuf;
-	int n, i;
+	struct dpdkio_port *port = dpdkio_port_get(portid);
+	int n, i, ret;
 
 	for (i = 0, n = 0; n < nb_pkts; n++) {
-#ifdef DEBUG_PKT_TX
-		pr_warn("======== TX ========\n");
-		dpdkio_slot_dump(slots[n]);
-#endif
 
 		mbuf = dpdkio_tx_slot_to_mbuf(portid, slots[n]);
 
 #ifdef DEBUG_PKT_TX
+		pr_warn("======== TX ========\n");
+		dpdkio_slot_dump(slots[n]);
 		rte_pktmbuf_dump(stdout, mbuf, 0);
 		printf("\n");
 #endif
+
+#ifdef DEBUG_PCAP
+		pcap_write_packet(port->tx_pcap_fd,
+				  slots[n]->segs, slots[n]->nsegs);
+#endif
+
 		if (likely(mbuf)) {
 			mbufs[i] = mbuf;
 			i++;
@@ -965,94 +888,15 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 		return 0;
 	}
 
-	return rte_eth_tx_burst(portid, 0, mbufs, i);
-}
+	ret = rte_eth_tx_prepare(portid, 0, mbufs, i);
+	if (unlikely(ret < i))
+		pr_err("prep failed\n");
 
-#if 0
-static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
-{
-	struct dpdkio_port *port = dpdkio_port_get(portid);
-	struct rte_mbuf *mbufs[LKL_DPDKIO_MAX_BURST], *head;
-	struct rte_mbuf *mbufs_tx[LKL_DPDKIO_MAX_BURST];
-	struct rte_mbuf_ext_shared_info *shinfo;
-	struct lkl_dpdkio_slot *slot;
-	int ret, n, i, nsegs, mbufcnt, mbufs_tx_cnt;
-
-	nsegs = 0;
-	for (n = 0; n < nb_pkts; n++) {
-		slot = slots[n];
-		nsegs += slot->nsegs;
-	}
-
-	ret = rte_pktmbuf_alloc_bulk(port->tx_mempool, mbufs, nsegs);
-	if (ret < 0)
-		return ret;
-
-	/* XXX: we need to handle over LKL_DPDKIO_MAX_BURST packets
-	 * and segments. usually, ndo_start_xmit is called per packet.
-	 * we might consider xmit_more for more performance.
-	 */
-
-	/* attach packets to mbufs */
-	mbufcnt = 0;
-	mbufs_tx_cnt = 0;
-	for (n = 0; n < nb_pkts; n++) {
-
-		slot = slots[n];
-
-#ifdef DEBUG_PCAP
-		/* pcap debugg!!  */
-		pcap_write_packet(port->tx_pcap_fd, slot->segs, slot->nsegs);
-#endif
-
-		shinfo = dpdkio_get_mbuf_shared_info(slot);
-		shinfo->free_cb = dpdkio_extmem_free_cb;
-		shinfo->fcb_opaque = slot;
-		rte_mbuf_ext_refcnt_set(shinfo, 1);
-		/* XXX: Note, multiple mubfs share a same shinfo, but,
-		 * its refcnt is 1, not the number of mbufs of a packet.
-		 */
-
-		head = NULL;
-
-		for (i = 0; i < slot->nsegs; i++) {
-			struct lkl_dpdkio_seg *seg = &slot->segs[i];
-			struct rte_mbuf *mbuf = mbufs[mbufcnt++];
-			void *buf_addr = (void *)seg->buf_addr;
-
-			rte_pktmbuf_attach_extbuf(mbuf, buf_addr,
-						  rte_mem_virt2iova(buf_addr),
-						  seg->buf_len, shinfo);
-			mbuf->data_len = seg->data_len;
-			mbuf->data_off = seg->data_off;
-			mbuf->pkt_len = seg->data_len;
-
-			if (head == NULL) {
-				/* the first mbuf of this packet */
-				head = mbuf;
-				mbufs_tx[mbufs_tx_cnt] = mbuf;
-			} else {
-				ret = rte_pktmbuf_chain(head, mbuf);
-				if (unlikely(ret < 0)) {
-					pr_err("too many mbuf chain: %s\n",
-					       strerror(errno));
-					assert(0);
-				}
-			}
-		}
-
-		dpdkio_fill_mbuf_tx_offload(slot, mbufs_tx[mbufs_tx_cnt]);
-//		pr_info("\n==== TX ====\n");
-//		rte_pktmbuf_dump(stdout, mbufs_tx[mbufs_tx_cnt], 0);
-
-		mbufs_tx_cnt++;
-	}
-
-	ret = rte_eth_tx_burst(portid, 0, mbufs_tx, nb_pkts);
+	ret = rte_eth_tx_burst(portid, 0, mbufs, ret);
+	port->txed += ret;
 
 	return ret;
 }
-#endif
 
 static void dpdkio_get_macaddr(int portid, char *mac)
 {
@@ -1068,15 +912,35 @@ static void dpdkio_get_macaddr(int portid, char *mac)
 	memcpy(mac, addr.addr_bytes, LKL_ETH_ALEN);
 }
 
+#define CHECK_INTERVAL 100 /* 100ms */
+#define MAX_CHECK_TIME 90 /* 9s (90 * 100ms) in total */
 static int dpdkio_get_link_status(int portid)
 {
+	char link_status[RTE_ETH_LINK_MAX_STR_LEN];
 	struct rte_eth_link link;
-	int ret;
+	int ret, count, old_status = 0;
 
-	ret = rte_eth_link_get_nowait(portid, &link);
-	if (ret < 0) {
-		pr_err("rte_eth_link_get_nowait: %s\n", strerror(ret * -1));
-		return -1;
+	/* referred from testpmd.c */
+	pr_info("Checking link status...\n");
+	for (count = 0; count <= MAX_CHECK_TIME; count++) {
+		memset(&link, 0, sizeof(link));
+		ret = rte_eth_link_get_nowait(portid, &link);
+		if (ret < 0) {
+			pr_warn("Port %u link get failed: %s\n",
+				portid, rte_strerror(-ret));
+			continue;
+		}
+
+		if (old_status != link.link_status){
+			rte_eth_link_to_str(link_status,
+					    sizeof(link_status), &link);
+			pr_info("Port %d %s\n", portid, link_status);
+		}
+		if (link.link_status == ETH_LINK_UP)
+			break;
+
+		old_status = link.link_status;
+		rte_delay_ms(CHECK_INTERVAL);
 	}
 
 	return link.link_status; /* ETH_LINK_UP 1 or ETH_LINK_DOWN 0 */

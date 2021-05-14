@@ -59,8 +59,9 @@ struct lkl_dpdkio_slot {
 
 
 #define LKL_DPDKIO_DESC_NUM		512
-//#define LKL_DPDKIO_RX_MEMPOOL_SIZE	(4 * 1024 * 1024) /* 4MB */
-#define LKL_DPDKIO_RX_MEMPOOL_SIZE	(64 * 1024 * 1024) /* 76MB */
+#define LKL_DPDKIO_RX_PAGE_NUM		4096
+/* RX_PAGE_NUM is calculated from: 256 x (65536 / 4096). 256 is the
+ * half of desc, and 65536 is LRO max size. */
 
 
 /* tools/lkl/lib/dpdkio.c */

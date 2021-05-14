@@ -23,10 +23,9 @@ struct lkl_dpdkio_ops {
 
 	int (*init_port)(int portid);	/* initialize a dpdkio port */
 
-	int (*add_rx_region)(int portid, unsigned long addr, int size);
-	/* pass a buffer region inside the bootmem and its size. the
-	 * region is added to the dpdk heap used for pktmbuf pool for
-	 * rx. */
+	int (*add_rx_page)(int portid, unsigned long addr);
+	/* pass a 4096-byte memory region for rx buffer. the region is
+	 * added used as rx packet buffer by dpdk extmem */
 
 	int (*init_rx_irq)(int portid, int *irq, int *irq_ack_fd);
 	/* an irq number and its eventfd associating the rx on this

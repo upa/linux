@@ -78,9 +78,10 @@ struct dpdkio_port {
 	rte_iova_t	iova_start;	/* start iova of bootmem */
 
 	/* rx */
-	struct lkl_iovec	rx_regions[DPDKIO_MAX_RX_REGIONS];
-	char			rx_mempool_name[DPDKIO_MEM_NAME_MAX];
-	struct rte_mempool	*rx_mempool;
+	char				rx_mempool_name[DPDKIO_MEM_NAME_MAX];
+	struct rte_mempool		*rx_mempool;
+	struct rte_pktmbuf_extmem	*rx_extmems; /* array of extmem */
+	int				nb_rx_extmems;
 
 	int		irq;		/* rx interrupt number */
 	int		irq_ack_fd;	/* eventfd to receive irq ack */
@@ -264,107 +265,32 @@ static int dpdkio_init_port(int portid)
 	}
 	port->iova_start = iova_start;	/* save the start of iova */
 
+	/* prepare extmem */
+	port->rx_extmems = calloc(sizeof(struct rte_pktmbuf_extmem),
+				  LKL_DPDKIO_RX_PAGE_NUM);
+	if (!port->rx_extmems) {
+		pr_err("failed to alloc memory for rx_extmems\n");
+		return -ENOMEM;
+	}
+	port->nb_rx_extmems = 0;
+
 	return 0;
 }
 
-static int dpdkio_add_rx_region(int portid, unsigned long addr, int size)
+static int dpdkio_add_rx_page(int portid, unsigned long addr)
 {
 	struct dpdkio_port *port = dpdkio_port_get(portid);
-	int n;
+	struct rte_pktmbuf_extmem *x;
 
-	if (size <= 0) {
-		pr_err("invalid size %d\n", size);
-		return -EINVAL;
-	}
+	x = &port->rx_extmems[port->nb_rx_extmems];
+	x->buf_ptr = (void *)addr;
+	x->buf_iova = rte_mem_virt2iova((void *)addr);
+	x->buf_len = 4096;
+	x->elt_size = 4096;
 
-	for (n = 0; n < DPDKIO_MAX_RX_REGIONS; n++) {
-		struct lkl_iovec *reg = &port->rx_regions[n];
-		if (reg->iov_len == 0) {
-			reg->iov_base = (void *)addr;
-			reg->iov_len = size;
-			return 0;
-		}
-	}
+	port->nb_rx_extmems++;
 
-	pr_err("no available slot for the rx region\n");
-	return -1;
-}
-
-/* mainly copied from dpdk/app/test-pmd/testpmd.c*/
-
-static int dpdkio_rx_region_to_extmem(int portid,
-				      int mbuf_size, struct lkl_iovec *reg,
-				      struct rte_pktmbuf_extmem **ext_mem)
-{
-	struct rte_pktmbuf_extmem *xmem;
-	int n, elt_num, elt_size;
-
-	/* I assume mbuf_size aligned to pagesz, so next line has no sense */
-	elt_size = RTE_ALIGN_CEIL(mbuf_size, RTE_CACHE_LINE_SIZE);
-	elt_num = reg->iov_len / elt_size;
-
-	xmem = malloc(sizeof(struct rte_pktmbuf_extmem) * elt_num);
-	if (!xmem) {
-		pr_err("failed to alloc rte_pktmbuf_extmem: %s",
-		       strerror(errno));
-		return -ENOMEM;
-	}
-
-	for (n = 0; n < elt_num; n++) {
-		struct rte_pktmbuf_extmem *x = xmem + n;
-		void *addr = reg->iov_base + (elt_size * n);
-		x->buf_ptr = addr;
-		x->buf_iova = rte_mem_virt2iova(addr);
-		x->buf_len = elt_size;
-		x->elt_size = elt_size;
-	}
-
-	*ext_mem = xmem;
-	return n;
-}
-
-static int dpdkio_rx_regions_to_extmem(int portid, int mbuf_size,
-				       struct rte_pktmbuf_extmem **ext_mem)
-{
-	struct dpdkio_port *port = dpdkio_port_get(portid);
-	struct rte_pktmbuf_extmem *xmem = NULL;
-	int nr_extmem = 0, nr_extmem_new = 0;
-	size_t segs_size = 0, nr_segs = 0;
-	int n, i, ret;
-
-	for (n = 0; n < DPDKIO_MAX_RX_REGIONS; n++) {
-		struct lkl_iovec *reg = &port->rx_regions[n];
-		struct rte_pktmbuf_extmem *x;
-
-		if (reg->iov_len == 0)
-			break;
-		segs_size += reg->iov_len;
-		nr_segs++;
-
-		ret = dpdkio_rx_region_to_extmem(portid, mbuf_size, reg, &x);
-		if (ret < 0)
-			return -1;
-
-		nr_extmem_new = nr_extmem + ret;
-		xmem = realloc(xmem, sizeof(*xmem) * nr_extmem_new);
-		if (!xmem) {
-			pr_err("failed to alloc for extmem\n");
-			return -1;
-		}
-
-		for (i = 0; i < ret; i++)
-			xmem[nr_extmem + i] = x[i];
-		free(x); /* malloc()ed in dpdkio_rx_region_to_extmem */
-
-		nr_extmem = nr_extmem_new;
-	}
-
-	*ext_mem = xmem;
-
-	pr_info("%d extmem segs on %lu-byte %lu rx regions\n",
-		nr_extmem, segs_size, nr_segs);
-
-	return nr_extmem;
+	return 0;
 }
 
 static int dpdkio_init_rx_irq(int portid, int *irq, int *irq_ack_fd)
@@ -478,19 +404,10 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 	}
 
 	/*** RX ***/
-	struct rte_pktmbuf_extmem *ext_mem;
-	int nr_extmem;
 	int mbuf_size = 1 << 12; /* must be 4k!! 2021/5/17 17:31 */
-
-	nr_extmem = dpdkio_rx_regions_to_extmem(portid, mbuf_size, &ext_mem);
-	if (nr_extmem < 0) {
-		pr_err("failed to prepare extmem on rx region\n");
-		return nr_extmem;
-	}
-
 	port->rx_mempool = rte_pktmbuf_pool_create_extbuf
 		(port->rx_mempool_name, nb_rxd << 2, 512, 0, mbuf_size,
-		 rte_socket_id(), ext_mem, nr_extmem);
+		 rte_socket_id(), port->rx_extmems, port->nb_rx_extmems);
 
 	if (!port->rx_mempool) {
 		pr_err("faield to create rx mbuf pool %s: %s\n",
@@ -836,8 +753,6 @@ static void dpdkio_extmem_free_cb(void *addr, void *opaque)
 	int portid = slot->portid;
 	void *skb = slot->skb;
 
-	__sync_synchronize();
-
 	set_null(&slot->skb); /* mark this slot is usable for tx */
 	lkl_host_ops.dpdkio_ops->free_skb(portid, skb);
 }
@@ -1171,7 +1086,7 @@ struct lkl_dpdkio_ops dpdkio_ops = {
 	.malloc			= dpdkio_malloc,
 	.free			= dpdkio_free,
 	.init_port		= dpdkio_init_port,
-	.add_rx_region		= dpdkio_add_rx_region,
+	.add_rx_page		= dpdkio_add_rx_page,
 	.init_rx_irq		= dpdkio_init_rx_irq,
 	.setup			= dpdkio_setup,
 	.start			= dpdkio_start,

@@ -51,6 +51,7 @@ struct lkl_config {
 	char *dump;
 	char *delay_main;
 	char *nameserver;
+	char *ealargs; /* space-separated values */
 };
 
 #ifdef LKL_HOST_CONFIG_JSMN

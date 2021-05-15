@@ -125,20 +125,6 @@ static int config_load(void)
 	return ret;
 }
 
-#if 0
-static char *ealargs[] = {
-	"-c", "1",
-	"-n", "1",
-};
-#else
-static char *ealargs[] = {
-	"-c", "1",
-	"-n", "1",
-	"--iova-mode", "va",
-//	"--log-level", "*:debug",
-};
-#endif
-
 void __attribute__((constructor))
 hijack_init(void)
 {

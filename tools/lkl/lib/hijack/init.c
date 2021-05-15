@@ -124,20 +124,6 @@ static int config_load(void)
 	return ret;
 }
 
-#if 0
-static char *ealargs[] = {
-	"-c", "1",
-	"-n", "1",
-};
-#else
-static char *ealargs[] = {
-	"-c", "1",
-	"-n", "1",
-	"--iova-mode", "va",
-//	"--log-level", "*:debug",
-};
-#endif
-
 void __attribute__((constructor))
 hijack_init(void)
 {
@@ -148,10 +134,6 @@ hijack_init(void)
 	ret = config_load();
 	if (ret < 0)
 		return;
-
-	ret = lkl_dpdkio_init(sizeof(ealargs) / sizeof(ealargs[0]), ealargs);
-	if (ret)
-		assert(0);
 
 	/* reflect pre-configuration */
 	lkl_load_config_pre(cfg);

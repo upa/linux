@@ -8,6 +8,7 @@
 #endif
 #include <lkl_host.h>
 #include <lkl_config.h>
+#include "dpdkio.h"
 
 #include "../../perf/pmu-events/jsmn.h"
 
@@ -159,8 +160,9 @@ int lkl_load_config_json(struct lkl_config *cfg, char *jstr)
 	}
 	for (pos = 1; pos < jp.toknext; pos++) {
 		if (toks[pos].type != JSMN_STRING) {
-			lkl_printf("string json type expected\n");
-			return -1;
+			lkl_printf("string json type expected: type %d\n",
+				   toks[pos].type);
+			continue;
 		}
 		if (jsoneq(jstr, &toks[pos], "interfaces") == 0) {
 			ret = parse_ifarr(cfg, toks, jstr, pos);
@@ -188,6 +190,8 @@ int lkl_load_config_json(struct lkl_config *cfg, char *jstr)
 			cfgptr = &cfg->dump;
 		} else if (jsoneq(jstr, &toks[pos], "delay_main") == 0) {
 			cfgptr = &cfg->delay_main;
+		} else if (jsoneq(jstr, &toks[pos], "ealargs") == 0) {
+			cfgptr = &cfg->ealargs;
 		} else {
 			lkl_printf("unexpected key in json %.*s\n",
 					toks[pos].end-toks[pos].start,
@@ -219,6 +223,7 @@ void lkl_show_config(struct lkl_config *cfg)
 	lkl_printf("cmdline: %s\n", cfg->boot_cmdline);
 	lkl_printf("dump: %s\n", cfg->dump);
 	lkl_printf("delay: %s\n", cfg->delay_main);
+	lkl_printf("ealargs: %s\n", cfg->ealargs);
 
 	for (iface = cfg->ifaces; iface; iface = iface->next, i++) {
 		lkl_printf("ifmac[%d] = %s\n", i, iface->ifmac_str);
@@ -706,10 +711,66 @@ static int lkl_clean_config(struct lkl_config *cfg)
 	return 0;
 }
 
+#ifdef LKL_HOST_CONFIG_DPDKIO
+
+static char **parse_ealargs(char *ealargs, int *argc)
+{
+	char *p, **argv;
+	int i, n = 1;
+
+	for (p = ealargs; *p != '\0'; p++) {
+		if (*p == ' ') {
+			*p = '\0';
+			n++;
+		}
+	}
+
+	argv = calloc(n, sizeof(char *));
+	if (!argv)
+		return NULL;
+
+	p = ealargs;
+	for (i = 0; i < n; i++) {
+		argv[i] = p;
+		while (*p != '\0') p++;
+		p++;
+	}
+
+	*argc = n;
+	return argv;
+}
+
+static char *default_ealargs = "-c 1";
+
+static int __lkl_dpdkio_init(char *cfg_ealargs, int lkl_debug)
+{
+	char **argv, *arg;
+	int argc, n;
+
+	arg = cfg_ealargs ? cfg_ealargs : default_ealargs;
+
+	argv = parse_ealargs(arg, &argc);
+	if (!argv) {
+		lkl_printf("failed to calloc for ealargs\n");
+		return -1;
+	}
+
+	if (lkl_debug) {
+		lkl_printf("ealargs: ");
+		for (n = 0; n < argc; n++)
+			lkl_printf("%s ", argv[n]);
+		lkl_printf("\n");
+	}
+
+	return lkl_dpdkio_init(argc, argv);
+}
+
+#endif /* LKL_HOST_CONFIG_DPDKIO */
+
 
 int lkl_load_config_pre(struct lkl_config *cfg)
 {
-	int lkl_debug, ret;
+	int lkl_debug = 0, ret;
 	struct lkl_config_iface *iface;
 
 	if (!cfg)
@@ -720,6 +781,12 @@ int lkl_load_config_pre(struct lkl_config *cfg)
 
 	if (!cfg->debug || (lkl_debug == 0))
 		lkl_host_ops.print = NULL;
+
+#ifdef LKL_HOST_CONFIG_DPDKIO
+	ret = __lkl_dpdkio_init(cfg->ealargs, lkl_debug);
+	if (ret < 0)
+		return -1;
+#endif /* LKL_HOST_CONFIG_DPDKIO */
 
 	for (iface = cfg->ifaces; iface; iface = iface->next) {
 		ret = lkl_config_netdev_create(cfg, iface);

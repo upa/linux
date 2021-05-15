@@ -48,6 +48,7 @@ struct lkl_config {
 	char *boot_cmdline;
 	char *dump;
 	char *delay_main;
+	char *ealargs; /* space-separated values */
 };
 
 int lkl_load_config_json(struct lkl_config *cfg, char *jstr);

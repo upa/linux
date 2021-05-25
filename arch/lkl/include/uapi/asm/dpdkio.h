@@ -6,18 +6,17 @@
 
 struct lkl_dpdkio_seg {
 	unsigned long	buf_addr;
-	unsigned int	buf_len;
-	unsigned int	data_off;
-	unsigned int	data_len;
+	uint32_t 	buf_len;
+	uint16_t	data_off;
+	uint16_t	data_len;
 };
+/* we assume that the largest segment size is 65535-byte (16bit) */
 
 struct lkl_dpdkio_slot {
-	struct lkl_dpdkio_seg	segs[LKL_DPDKIO_MAX_SEGS]; /* packet  */
+	struct lkl_dpdkio_seg	segs[LKL_DPDKIO_MAX_SEGS]; /* packet */
+
 	uint16_t		nsegs;		/* number of segs */
 	uint16_t		pkt_len;	/* total packet length */
-
-	void 	*mbuf;	/* pointer to struct mbuf of this packet */
-	void	*skb;	/* pointer to struct sk_buff of this packet */
 
 	/* header sizes from rte_mbuf_core.h for TX offload */
 	union {
@@ -39,7 +38,14 @@ struct lkl_dpdkio_slot {
 
 	uint16_t	portid;	/* dpdkio port id */
 
-	char opaque[32];  /* used as rte_mbuf_ext_shared_info structures */
+	void 	*mbuf;	/* pointer to struct mbuf of this packet */
+	void	*skb;	/* pointer to struct sk_buff of this packet */
+
+	char opaque[24];  /* used as rte_mbuf_ext_shared_info
+			   * structure. must be larger equal to
+			   * 24-byte (size of struct
+			   * rte_mbuf_ext_shared_info).
+			   */
 };
 
 /* XXX: we need to consider L4 checksum */
@@ -50,7 +56,7 @@ struct lkl_dpdkio_slot {
 
 #define LKL_DPDKIO_PAGE_SIZE		4096
 
-#define LKL_DPDKIO_SLOT_NUM		1024	/* must be power of 2*/
+#define LKL_DPDKIO_SLOT_NUM		1024	/* must be power of 2 */
 #define LKL_DPDKIO_SLOT_MASK		(LKL_DPDKIO_SLOT_NUM - 1)
 /* Note that a lkl_dpdkio_slot represents a packet including multiple
  * segments. Thus, the numbers of mbufs on tx/rx mempool must be

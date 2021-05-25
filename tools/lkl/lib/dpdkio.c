@@ -76,30 +76,33 @@ int lkl_dpdkio_exit(void)
 
 /* structure representing lkl dpdkio backend port */
 struct dpdkio_port {
+
 	int portid;
 
-	rte_iova_t	iova_start;	/* start iova of bootmem */
-
 	/* rx */
-	char				rx_mempool_name[DPDKIO_MEM_NAME_MAX];
-	struct rte_mempool		*rx_mempool;
-	struct rte_pktmbuf_extmem	*rx_extmems; /* array of extmem */
-	struct lkl_dpdkio_ring		pending_mbuf_ring;
-	int				nb_rx_extmems;
+	struct lkl_dpdkio_ring	pending_mbuf_ring; /* rxed mbufs */
+	struct lkl_dpdkio_ring	free_mbuf_ring;	/* mbufs to be freed */
 
+	/* tx */
+	struct rte_mempool	*tx_mempool;
+
+	/* rx irq */
 	int		irq;		/* rx interrupt number */
 	int		irq_ack_fd;	/* eventfd to receive irq ack */
 	lkl_thread_t	poll_tid;	/* rx polling thread id */
 	uint8_t		poll_hup;	/* 1 indicates stopping rx polling */
 	uint8_t		poll_enabled;
 
+	/* rx mempool on extmem */
+	char				rx_mempool_name[DPDKIO_MEM_NAME_MAX];
+	struct rte_mempool		*rx_mempool;
+	struct rte_pktmbuf_extmem	*rx_extmems; /* array of extmem */
+	int				nb_rx_extmems;
+
 	/* tx */
-	char			tx_mempool_name[DPDKIO_MEM_NAME_MAX];
-	struct rte_mempool	*tx_mempool;
+	char		tx_mempool_name[DPDKIO_MEM_NAME_MAX];
 	unsigned long	txed;
 
-	/* mbuf queue to be released */
-	struct lkl_dpdkio_ring free_mbuf_ring;
 
 #ifdef DEBUG_PCAP
 	/* debug */
@@ -239,7 +242,6 @@ static void dpdkio_free(void *addr)
 static int dpdkio_init_port(int portid)
 {
 	struct dpdkio_port *port;
-	rte_iova_t iova_start;
 
 	if (portid >= DPDKIO_PORT_MAX) {
 		pr_err("too many dpdkio ports (%d > %d)\n",
@@ -260,15 +262,6 @@ static int dpdkio_init_port(int portid)
 		 "rxpool-%d", portid);
 	snprintf(port->tx_mempool_name, DPDKIO_MEM_NAME_MAX,
 		 "txpool-%d", portid);
-
-	/* save the iova of the lkl boot memory */
-	iova_start = rte_malloc_virt2iova((void *)(lkl_host_ops.memory_start));
-	if (iova_start == RTE_BAD_IOVA) {
-		pr_err("failed to get iova of memory_start 0x%lx\n",
-		       lkl_host_ops.memory_start);
-		return -EINVAL;
-	}
-	port->iova_start = iova_start;	/* save the start of iova */
 
 	/* prepare extmem */
 	port->rx_extmems = calloc(sizeof(struct rte_pktmbuf_extmem),
@@ -901,8 +894,10 @@ static struct rte_mbuf *dpdkio_tx_slot_to_mbuf(int portid,
 static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 {
 	struct rte_mbuf *mbufs[LKL_DPDKIO_MAX_BURST], *mbuf;
-	struct dpdkio_port *port = dpdkio_port_get(portid);
 	int n, i, ret;
+#ifdef DEBUG_PCAP
+	struct dpdkio_port *port = dpdkio_port_get(portid);
+#endif
 
 	for (i = 0, n = 0; n < nb_pkts; n++) {
 
@@ -914,7 +909,6 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 		rte_pktmbuf_dump(stdout, mbuf, 0);
 		printf("\n");
 #endif
-
 #ifdef DEBUG_PCAP
 		pcap_write_packet(port->tx_pcap_fd,
 				  slots[n]->segs, slots[n]->nsegs);
@@ -936,7 +930,10 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 		pr_err("prep failed\n");
 
 	ret = rte_eth_tx_burst(portid, 0, mbufs, ret);
+
+#ifdef DEBUG_STATS
 	port->txed += ret;
+#endif
 
 	return ret;
 }

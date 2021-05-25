@@ -43,16 +43,15 @@ early_param("lkl_dpdkio", dpdkio_append_dpdk_port);
 
 /* dpdkio device */
 struct dpdkio_dev {
-	struct list_head	list;
 
 	int			portid;	/* dpdk port id */
 	struct net_device	*dev;	/* netdevice */
 
-	struct lkl_dpdkio_slot	txslots[LKL_DPDKIO_SLOT_NUM];
-	struct lkl_dpdkio_slot	rxslots[LKL_DPDKIO_SLOT_NUM];
 	uint32_t		txhead;
-	uint32_t		rxhead;
+	struct lkl_dpdkio_slot	txslots[LKL_DPDKIO_SLOT_NUM];
 
+	uint32_t		rxhead;
+	struct lkl_dpdkio_slot	rxslots[LKL_DPDKIO_SLOT_NUM];
 	/* txslots and rxslots are managed in a skimped circular queue
 	 * manner; it does not have `tail`, because releasing mbuf
 	 * (TX) and skb (RX) is done in a asynchronous manner. For
@@ -61,21 +60,19 @@ struct dpdkio_dev {
 	 * is not NULL), it means slot is full, wait.
 	 */
 
+	/* skb queue to be released */
+	struct lkl_dpdkio_ring free_skb_ring;
+
 	/* tx */
 #define DPDKIO_TX_MAX_BATCH	16
 	uint8_t 		slot_batch_count; /* # of pkts on tx batch */
 	struct lkl_dpdkio_slot	*slot_batch[DPDKIO_TX_MAX_BATCH + 1];
 	/* batch of packet slots to be transmitted */
-	void			*txlock;
 
 	/* rx */
 	int			irq;		/* rx interrupt number */
 	int			irq_ack_fd;	/* eventfd for ack irq */
 	struct napi_struct	napi;
-	void			*rxlock;
-
-	/* skb queue to be released */
-	struct lkl_dpdkio_ring free_skb_ring;
 };
 
 static struct dpdkio_dev *dpdk_devs[MAX_DPDK_PORTS];
@@ -270,8 +267,6 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 	unsigned short f;
 	int ret;
 
-	lkl_ops->sem_up(dpdk->txlock);
-
 	/* XXX: free TXed skbs. should it be workqueue??? */
 	dpdkio_free_tx_skb(dpdk);
 
@@ -360,15 +355,11 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 	dev->stats.tx_packets++;
 	dev->stats.tx_bytes += pkt_len;
 
-	lkl_ops->sem_down(dpdk->txlock);
-
 	return NETDEV_TX_OK;
 
 out_drop:
 	pr_err("out_drop!\n");
 	dev_kfree_skb_any(skb);
-
-	lkl_ops->sem_down(dpdk->txlock);
 
 	return NETDEV_TX_OK;
 }
@@ -521,8 +512,6 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 	uint32_t head, b;
 	int n, i, nr_rx;
 
-	lkl_ops->sem_up(dpdk->rxlock);
-
 	head = dpdk->rxhead;
 	b = min(budget, LKL_DPDKIO_MAX_BURST);
 
@@ -574,8 +563,6 @@ int dpdkio_poll(struct napi_struct *napi, int budget)
 	/* exit polling mode */
 	napi_complete_done(napi, nr_pkts);
 	lkl_ops->dpdkio_ops->enable_rx_interrupt(dpdk->portid);
-
-	lkl_ops->sem_down(dpdk->rxlock);
 
 	return nr_pkts;
 }
@@ -664,17 +651,6 @@ static int dpdkio_init_dev(int port)
 	memset(dpdk, 0, sizeof(*dpdk));
 	dpdk->dev = dev;
 	dpdk->portid = port;
-	dpdk->txlock = lkl_ops->sem_alloc(1);
-	if (!dpdk->txlock) {
-		pr_err("failed to alloc lkl semaphore\n");
-		return -ENOMEM;
-	}
-
-	dpdk->rxlock = lkl_ops->sem_alloc(1);
-	if (!dpdk->rxlock) {
-		pr_err("failed to alloc lkl semaphore\n");
-		return -ENOMEM;
-	}
 
 	for (n = 0; n < LKL_DPDKIO_SLOT_NUM; n++) {
 		dpdk->txslots[n].portid = port;

@@ -353,16 +353,18 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 		return ret;
 	}
 
-	port_conf.txmode.offloads = (DEV_TX_OFFLOAD_IPV4_CKSUM |
-				     DEV_TX_OFFLOAD_UDP_CKSUM |
-				     DEV_TX_OFFLOAD_TCP_CKSUM |
-				     DEV_TX_OFFLOAD_TCP_TSO);
-	port_conf.txmode.mq_mode = ETH_MQ_TX_NONE;
+	port_conf.txmode.offloads = (RTE_ETH_TX_OFFLOAD_IPV4_CKSUM |
+				     RTE_ETH_TX_OFFLOAD_UDP_CKSUM |
+				     RTE_ETH_TX_OFFLOAD_TCP_CKSUM |
+				     RTE_ETH_TX_OFFLOAD_TCP_TSO);
+	port_conf.txmode.mq_mode = RTE_ETH_MQ_TX_NONE;
 
-	port_conf.rxmode.offloads = (DEV_RX_OFFLOAD_CHECKSUM |
-				     DEV_RX_OFFLOAD_TCP_LRO |
-				     DEV_RX_OFFLOAD_SCATTER);
-	port_conf.rxmode.mq_mode = ETH_MQ_RX_NONE;
+	port_conf.rxmode.offloads = (RTE_ETH_RX_OFFLOAD_CHECKSUM |
+				     RTE_ETH_RX_OFFLOAD_UDP_CKSUM |
+				     RTE_ETH_RX_OFFLOAD_TCP_CKSUM |
+				     RTE_ETH_RX_OFFLOAD_TCP_LRO |
+				     RTE_ETH_RX_OFFLOAD_SCATTER);
+	port_conf.rxmode.mq_mode = RTE_ETH_MQ_RX_NONE;
 	port_conf.rxmode.max_lro_pkt_size = dev_info.max_lro_pkt_size;
 
 	pr_info("port %d tx offload capa=0x%lx conf=0x%lx\n",
@@ -718,17 +720,17 @@ static int dpdkio_rx_mbuf_to_slot(int portid, struct rte_mbuf *_mbuf,
 	} while (0);
 #endif
 
-	switch (_mbuf->ol_flags & PKT_RX_IP_CKSUM_MASK) {
-	case PKT_RX_IP_CKSUM_GOOD:
+	switch (_mbuf->ol_flags & RTE_MBUF_F_RX_IP_CKSUM_MASK) {
+	case RTE_MBUF_F_RX_IP_CKSUM_GOOD:
 		slot->rx_ip_cksum_result = LKL_DPDKIO_RX_IP_CKSUM_GOOD;
 		break;
-	case PKT_RX_IP_CKSUM_UNKNOWN:
+	case RTE_MBUF_F_RX_IP_CKSUM_UNKNOWN:
 		slot->rx_ip_cksum_result = LKL_DPDKIO_RX_IP_CKSUM_UNKNOWN;
 		break;
-	case PKT_RX_IP_CKSUM_BAD:
+	case RTE_MBUF_F_RX_IP_CKSUM_BAD:
 		slot->rx_ip_cksum_result = LKL_DPDKIO_RX_IP_CKSUM_BAD;
 		break;
-	case PKT_RX_IP_CKSUM_NONE:
+	case RTE_MBUF_F_RX_IP_CKSUM_NONE:
 		slot->rx_ip_cksum_result = LKL_DPDKIO_RX_IP_CKSUM_NONE;
 		break;
 	default:
@@ -826,21 +828,21 @@ static void dpdkio_fill_mbuf_tx_offload(struct lkl_dpdkio_slot *slot,
 {
 	switch (ntohs(slot->eth_protocol)) {
 	case ETH_P_IP:
-		mbuf->ol_flags |= (PKT_TX_IPV4 | PKT_TX_IP_CKSUM);
+		mbuf->ol_flags |= (RTE_MBUF_F_TX_IPV4 | RTE_MBUF_F_TX_IP_CKSUM);
 		break;
 	case ETH_P_IPV6:
-		mbuf->ol_flags |=  PKT_TX_IPV6;
+		mbuf->ol_flags |=  RTE_MBUF_F_TX_IPV6;
 		break;
 	}
 
 	if (slot->ip_protocol == IPPROTO_TCP) {
-		mbuf->ol_flags |= PKT_TX_TCP_CKSUM;
+		mbuf->ol_flags |= RTE_MBUF_F_TX_TCP_CKSUM;
 		mbuf->l2_len = slot->l2_len;
 		mbuf->l3_len = slot->l3_len;
 		mbuf->l4_len = slot->l4_len;
 
 		if (slot->nsegs > 1) {
-			mbuf->ol_flags |= PKT_TX_TCP_SEG;
+			mbuf->ol_flags |= RTE_MBUF_F_TX_TCP_SEG;
 			mbuf->tso_segsz = slot->tso_segsz;
 		}
 	}
@@ -976,7 +978,7 @@ static int dpdkio_get_link_status(int portid)
 					    sizeof(link_status), &link);
 			pr_info("Port %d %s\n", portid, link_status);
 		}
-		if (link.link_status == ETH_LINK_UP)
+		if (link.link_status == RTE_ETH_LINK_UP)
 			break;
 
 		old_status = link.link_status;

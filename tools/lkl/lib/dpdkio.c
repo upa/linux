@@ -897,7 +897,7 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 {
 	struct rte_mbuf *mbufs[LKL_DPDKIO_MAX_BURST], *mbuf;
 	int n, i, ret;
-#ifdef DEBUG_PCAP
+#if defined(DEBUG_PCAP) || defined(DEBUG_STATS)
 	struct dpdkio_port *port = dpdkio_port_get(portid);
 #endif
 

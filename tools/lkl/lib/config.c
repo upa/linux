@@ -6,6 +6,7 @@
 #include <cygwin/socket.h>
 #endif
 #include <arpa/inet.h>
+#include <fcntl.h>
 #else
 #define inet_pton lkl_inet_pton
 #endif
@@ -184,6 +185,8 @@ int lkl_load_config_json(struct lkl_config *cfg, const char *jstr)
 			cfgptr = &cfg->nameserver;
 		} else if (jsoneq(jstr, &toks[pos], "ealargs") == 0) {
 			cfgptr = &cfg->ealargs;
+		} else if (jsoneq(jstr, &toks[pos], "disk_image") == 0) {
+			cfgptr = &cfg->disk_image;
 		} else {
 			lkl_printf("unexpected key in json %.*s\n",
 					toks[pos].end-toks[pos].start,
@@ -233,6 +236,7 @@ void lkl_show_config(struct lkl_config *cfg)
 	lkl_printf("dump: %s\n", cfg->dump);
 	lkl_printf("delay: %s\n", cfg->delay_main);
 	lkl_printf("ealargs: %s\n", cfg->ealargs);
+	lkl_printf("disk_image: %s\n", cfg->disk_image);
 
 	for (iface = cfg->ifaces; iface; iface = iface->next, i++) {
 		lkl_printf("ifmac[%d] = %s\n", i, iface->ifmac_str);
@@ -679,6 +683,81 @@ static int lkl_config_netdev_configure(struct lkl_config *cfg,
 	return 0;
 }
 
+static struct lkl_disk disk;
+static int disk_id = -1;
+
+void lkl_config_disk_image_pre(const char *disk_image)
+{
+	char *saveptr = NULL, *token = NULL;
+	char *key = NULL;
+	char strings[256];
+	int ret = 0;
+
+	strcpy(strings, disk_image);
+	for (token = strtok_r(strings, ";", &saveptr); token;
+	     token = strtok_r(NULL, ";", &saveptr)) {
+		key = strtok(token, "=");
+		strtok(NULL, "=");
+		/* key is a host file (src), value is a mount point (dest) */
+		disk.fd = open(key, O_RDWR);
+		if (disk.fd < 0) {
+			lkl_printf("Failed to open a file %s: (%s)\n",
+				   key, lkl_strerror(ret));
+			return;
+		}
+
+		disk.ops = NULL;
+
+		disk_id = lkl_disk_add(&disk);
+		if (disk_id < 0) {
+			lkl_printf("Failed to add disk %s: (%s)\n",
+				   key, lkl_strerror(ret));
+			return;
+		}
+	}
+}
+
+void lkl_config_disk_image_post(const char *disk_image)
+{
+	char *saveptr = NULL, *token = NULL;
+	char *key = NULL, *value = NULL;
+	char strings[256];
+	int ret = 0;
+	static char mpoint[32];
+
+	strcpy(strings, disk_image);
+	for (token = strtok_r(strings, ";", &saveptr); token;
+	     token = strtok_r(NULL, ";", &saveptr)) {
+		key = strtok(token, "=");
+		value = strtok(NULL, "=");
+
+		lkl_printf("Mounting %s to %s\n", key, value);
+
+		/* key is a host file (src), value is a mount point (dest) */
+		ret = lkl_mount_dev(disk_id, 0, "ext4", 0, NULL,
+				    mpoint, sizeof(mpoint));
+		if (ret < 0) {
+			lkl_printf("Failed to mount disk %s: (%s)\n",
+				   key, lkl_strerror(ret));
+			return;
+		}
+
+		/* XXX: only support a single entry */
+		break;
+	}
+
+	lkl_printf("Mounting bind for %s\n", mpoint);
+	ret = lkl_sys_chdir("/");
+	ret = lkl_sys_chroot(mpoint);
+//	ret = lkl_sys_mount(mpoint, value, "none", LKL_MS_BIND, NULL);
+	if (ret < 0) {
+		lkl_printf("Failed to bind mount to %s: (%s)\n",
+			   value, lkl_strerror(ret));
+		return;
+	}
+
+}
+
 static void free_cfgparam(char *cfgparam)
 {
 	if (cfgparam)
@@ -718,6 +797,7 @@ static int lkl_clean_config(struct lkl_config *cfg)
 	free_cfgparam(cfg->dump);
 	free_cfgparam(cfg->delay_main);
 	free_cfgparam(cfg->nameserver);
+	free_cfgparam(cfg->disk_image);
 	return 0;
 }
 
@@ -757,7 +837,8 @@ static int __lkl_dpdkio_init(char *cfg_ealargs, int lkl_debug)
 	char **argv, *arg;
 	int argc, n;
 
-	arg = cfg_ealargs ? cfg_ealargs : default_ealargs;
+	arg = cfg_ealargs ? cfg_ealargs : "";
+	//arg = cfg_ealargs ? cfg_ealargs : default_ealargs;
 
 	argv = parse_ealargs(arg, &argc);
 	if (!argv) {
@@ -804,6 +885,9 @@ int lkl_load_config_pre(struct lkl_config *cfg)
 			return -1;
 	}
 
+	if (cfg->disk_image)
+		lkl_config_disk_image_pre(cfg->disk_image);
+
 	return 0;
 }
 
@@ -814,6 +898,9 @@ int lkl_load_config_post(struct lkl_config *cfg)
 
 	if (!cfg)
 		return 0;
+
+	if (cfg->disk_image)
+		lkl_config_disk_image_post(cfg->disk_image);
 
 	if (cfg->mount)
 		mount_cmds_exec(cfg->mount, lkl_mount_fs);

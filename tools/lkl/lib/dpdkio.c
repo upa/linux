@@ -1,5 +1,6 @@
 #include <lkl_host.h>
 #include <lkl/asm/dpdkio.h>
+#include <linux/udp.h>
 #include "dpdkio.h"
 
 #ifndef LKL_HOST_CONFIG_DPDKIO
@@ -380,12 +381,17 @@ static int dpdkio_setup(int portid, int *nb_rx_desc, int *nb_tx_desc)
 		return ret;
 	}
 
+#if 0
+#define DPDK_MAX_PACKET_SZ (65535 - (sizeof(struct rte_mbuf) + RTE_PKTMBUF_HEADROOM))
+#define DPDK_MBUF_SIZ \
+    (DPDK_MAX_PACKET_SZ + sizeof(struct rte_mbuf) + RTE_PKTMBUF_HEADROOM)
+#endif
 	/*** TX ***/
 	/* tx mbuf can be small because packet payload is allocated
 	 * along with sk_buff. It is attached as extmem. */
 	port->tx_mempool = rte_pktmbuf_pool_create(port->tx_mempool_name,
 						   nb_txd << 3, 512, 0,
-						   64, rte_socket_id());
+						   65535, rte_socket_id());
 	if (!port->tx_mempool) {
 		pr_err("faield to create tx mbuf pool %s: %s\n",
 		       port->tx_mempool_name, strerror(rte_errno));
@@ -931,7 +937,7 @@ static int dpdkio_tx(int portid, struct lkl_dpdkio_slot **slots, int nb_pkts)
 	if (unlikely(ret < i))
 		pr_err("prep failed\n");
 
-	ret = rte_eth_tx_burst(portid, 0, mbufs, ret);
+	ret = rte_eth_tx_burst(portid, 0, mbufs, i);
 
 #ifdef DEBUG_STATS
 	port->txed += ret;
@@ -988,6 +994,120 @@ static int dpdkio_get_link_status(int portid)
 	return link.link_status; /* ETH_LINK_UP 1 or ETH_LINK_DOWN 0 */
 }
 
+static void *dpdkio_rte_pktmbuf_alloc(uint16_t portid)
+{
+	struct dpdkio_port *port = dpdkio_port_get(portid);
+	return rte_pktmbuf_alloc(port->tx_mempool);
+}
+
+static char *dpdkio_rte_pktmbuf_append(void *rm, uint16_t len)
+{
+	return rte_pktmbuf_append(rm, len);
+}
+
+static void dpdkio_rte_pktmbuf_free(void *rm)
+{
+	return rte_pktmbuf_free(rm);
+}
+
+static uint16_t dpdkio_rte_eth_tx_prepare(uint16_t port_id, uint16_t queue_id,
+				       void **tx_pkts, uint16_t nb_pkts)
+{
+	return rte_eth_tx_prepare(port_id, queue_id,
+				  (struct rte_mbuf **)tx_pkts, nb_pkts);
+}
+
+static uint16_t dpdkio_rte_eth_tx_burst(uint16_t port_id, uint16_t queue_id,
+					void **tx_pkts, uint16_t nb_pkts)
+{
+	return rte_eth_tx_burst(port_id, queue_id,
+				(struct rte_mbuf **)tx_pkts, nb_pkts);
+}
+
+static struct rte_mbuf_ext_shared_info dpdk_shinfo = {
+	.free_cb = NULL,
+	.fcb_opaque = NULL,
+	.refcnt = 1,
+};
+
+static void dpdkio_rte_pktmbuf_attach_extbuf(void *m, void *buf_addr,
+					     uint16_t buf_len, uint16_t pkt_len,
+					     void (*cb)(void *addr, void *skb_ptr),
+					     void *userdata)
+{
+	struct rte_mbuf *rm = (struct rte_mbuf *)m;
+	dpdk_shinfo.free_cb = cb;
+	dpdk_shinfo.fcb_opaque = userdata;
+
+	rte_pktmbuf_attach_extbuf(rm, buf_addr, rte_mem_virt2iova(buf_addr),
+				  buf_len, &dpdk_shinfo);
+	rm->data_len = buf_len;
+	rm->pkt_len = pkt_len;
+}
+
+static void dpdkio_tx_prep(void *rm, uint16_t protocol, uint16_t ip_protocol,
+			   uint64_t l2_len, uint64_t l3_len, uint64_t l4_len,
+			   uint64_t tso_segsz, int gso)
+{
+	struct rte_mbuf *mbuf = (struct rte_mbuf *)rm;
+
+#if 0
+	switch (ntohs(protocol)) {
+	case ETH_P_IP:
+		mbuf->ol_flags |= (RTE_MBUF_F_TX_IPV4 | RTE_MBUF_F_TX_IP_CKSUM);
+		break;
+	case ETH_P_IPV6:
+		mbuf->ol_flags |=  RTE_MBUF_F_TX_IPV6;
+		break;
+	}
+
+	if (ip_protocol == IPPROTO_TCP) {
+		mbuf->ol_flags |= RTE_MBUF_F_TX_TCP_CKSUM;
+		mbuf->l2_len = l2_len;
+		mbuf->l3_len = l3_len;
+		mbuf->l4_len = l4_len;
+
+		if (gso) {
+			mbuf->ol_flags |= RTE_MBUF_F_TX_TCP_SEG;
+			mbuf->tso_segsz = tso_segsz;
+		}
+	}
+#else
+	mbuf->outer_l2_len = 0;
+	mbuf->outer_l3_len = 0;
+	mbuf->l2_len = l2_len;
+	mbuf->l3_len = l3_len;
+
+	if (!ip_protocol)
+		return;
+
+	if (ntohs(protocol)) {
+		mbuf->ol_flags |= RTE_MBUF_F_TX_IPV4 | RTE_MBUF_F_TX_IP_CKSUM;
+	} else {
+		mbuf->ol_flags |= RTE_MBUF_F_TX_IPV6;
+	}
+
+	if (ip_protocol == IPPROTO_TCP) {
+		mbuf->ol_flags |= RTE_MBUF_F_TX_TCP_CKSUM;
+		mbuf->l4_len = l4_len;
+		mbuf->tso_segsz = tso_segsz;
+
+		if (gso) {
+			mbuf->ol_flags |= RTE_MBUF_F_TX_TCP_SEG;
+		}
+	} else if (ip_protocol == IPPROTO_UDP) {
+		mbuf->l4_len = sizeof(struct udphdr);
+		mbuf->ol_flags |= RTE_MBUF_F_TX_UDP_CKSUM;
+	} else if (ip_protocol == IPPROTO_SCTP) {
+		mbuf->l4_len = 0; // XXX: sizeof(struct sctphdr);
+		mbuf->ol_flags |= RTE_MBUF_F_TX_SCTP_CKSUM;
+	} else {
+		lkl_printf("%s: dpdkio: unknown protocol (%d)\n",
+			   __func__, ip_protocol);
+	}
+#endif
+}
+
 struct lkl_dpdkio_ops dpdkio_ops = {
 	.malloc			= dpdkio_malloc,
 	.free			= dpdkio_free,
@@ -1006,6 +1126,13 @@ struct lkl_dpdkio_ops dpdkio_ops = {
 	.free_skb		= NULL,	/* fillled by lkl/kernel/dpdkio.c */
 	.get_macaddr		= dpdkio_get_macaddr,
 	.get_link_status	= dpdkio_get_link_status,
+	.rte_pktmbuf_alloc	= dpdkio_rte_pktmbuf_alloc,
+	.rte_pktmbuf_append	= dpdkio_rte_pktmbuf_append,
+	.rte_pktmbuf_free	= dpdkio_rte_pktmbuf_free,
+	.rte_eth_tx_prepare	= dpdkio_rte_eth_tx_prepare,
+	.rte_eth_tx_burst	= dpdkio_rte_eth_tx_burst,
+	.rte_pktmbuf_attach_extbuf = dpdkio_rte_pktmbuf_attach_extbuf,
+	.tx_prep		= dpdkio_tx_prep,
 };
 
 

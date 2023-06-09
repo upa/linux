@@ -27,3 +27,4 @@ liblkl-$(LKL_HOST_CONFIG_VHOST_NET) += vhost_net.o
 liblkl-y += dpdkio.o
 liblkl-y += config.o
 liblkl-y += usrcall.o
+CFLAGS_config.o = -O0 -g

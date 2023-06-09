@@ -125,6 +125,22 @@ struct lkl_dpdkio_ops {
 
 	/* XXX: may need feature negotiation for, e.g., offloading
 	 * capability. */
+
+	void *(*rte_pktmbuf_alloc)(uint16_t port_id);
+	char *(*rte_pktmbuf_append)(void *rm, uint16_t len);
+	void (*rte_pktmbuf_free)(void *rm);
+	uint16_t (*rte_eth_tx_prepare)(uint16_t port_id, uint16_t queue_id,
+				       void **tx_pkts, uint16_t nb_pkts);
+	uint16_t (*rte_eth_tx_burst)(uint16_t port_id, uint16_t queue_id,
+				     void **tx_pkts, uint16_t nb_pkts);
+	void (*rte_pktmbuf_attach_extbuf)(void *rm, void *buf_addr,
+					  uint16_t buf_len, uint16_t pkt_len,
+					  void (*free_skb_cb)(void *addr, void *skb_ptr),
+					  void *userdata);
+	void (*tx_prep)(void *rm, uint16_t protocol, uint16_t ip_protocol,
+			uint64_t l2_len, uint64_t l3_len, uint64_t l4_len,
+			uint64_t tso_segsz, int gso);
+
 };
 
 /**

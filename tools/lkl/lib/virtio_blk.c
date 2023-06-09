@@ -78,6 +78,7 @@ int lkl_disk_add(struct lkl_disk *disk)
 	if (!dev)
 		return -LKL_ENOMEM;
 
+	memset(dev, 0, sizeof(*dev));
 	disk->dev = dev;
 
 	dev->dev.device_id = LKL_VIRTIO_ID_BLOCK;

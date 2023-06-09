@@ -634,3 +634,9 @@ int pipe(int fd[2])
 
 	return pipe2(fd, 0);
 }
+
+int pthread_setaffinity_np2(pthread_t thread, size_t cpusetsize,
+                                  const cpu_set_t *cpuset)
+{
+	return 0;
+}

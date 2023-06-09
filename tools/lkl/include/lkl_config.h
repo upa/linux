@@ -52,6 +52,7 @@ struct lkl_config {
 	char *delay_main;
 	char *nameserver;
 	char *ealargs; /* space-separated values */
+	char *disk_image;
 };
 
 #ifdef LKL_HOST_CONFIG_JSMN

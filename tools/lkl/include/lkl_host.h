@@ -5,6 +5,7 @@
 extern "C" {
 #endif
 
+#include <stdint.h>
 #include <lkl/asm/host_ops.h>
 #include <lkl.h>
 

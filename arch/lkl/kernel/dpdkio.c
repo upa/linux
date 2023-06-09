@@ -73,6 +73,10 @@ struct dpdkio_dev {
 	int			irq;		/* rx interrupt number */
 	int			irq_ack_fd;	/* eventfd for ack irq */
 	struct napi_struct	napi;
+
+	/* for testing */
+	struct sk_buff_head sk_buff;
+	unsigned long state;
 };
 
 static struct dpdkio_dev *dpdk_devs[MAX_DPDK_PORTS];
@@ -255,6 +259,172 @@ static struct lkl_dpdkio_slot *dpdkio_get_free_tx_slot(struct dpdkio_dev *dpdk)
 	return slot;
 }
 
+#define TZK_XMIT
+#ifdef TZK_XMIT
+static void free_skb_cb(void *addr, void *skb_ptr)
+{
+	struct sk_buff *skb = skb_ptr;
+	dev_kfree_skb_any(skb);
+}
+
+static void noop_cb(void *addr, void *skb_ptr)
+{
+}
+
+/* XXX^2*/
+struct priv_rte_mbuf {
+	uint8_t rsv1[20];
+	uint16_t nb_segs;
+	uint8_t rsv2[42];
+	void *next;
+};
+
+static int zero_copy_skb(struct dpdkio_dev *dpdk, struct sk_buff *skb,
+			 void *rm)
+{
+	struct priv_rte_mbuf *seg, *prev;
+	void *addr;
+	int i;
+	size_t size = skb_is_nonlinear(skb) ? skb_headlen(skb) : skb->len;
+
+//	pr_warn("go linear, sz=%lu, skblen=%u", size, skb->len);
+
+	lkl_ops->dpdkio_ops->rte_pktmbuf_attach_extbuf(rm, skb->data,
+						       size, skb->len,
+						       free_skb_cb, skb);
+
+	prev = (struct priv_rte_mbuf *)rm;
+	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
+		const struct skb_frag_struct *frag;
+
+		seg = lkl_ops->dpdkio_ops->rte_pktmbuf_alloc(dpdk->portid);
+		if (!seg) {
+			return -1;
+		}
+
+		prev->next = seg;
+		prev = seg;
+		((struct priv_rte_mbuf *)rm)->nb_segs += 1;
+
+		frag = &skb_shinfo(skb)->frags[i];
+		addr = lowmem_page_address(skb_frag_page(frag)) +
+		       frag->page_offset;
+
+//		pr_warn("go frag, segs=%d, frg_sz=%d", ((struct priv_rte_mbuf *)rm)->nb_segs, skb_frag_size(frag));
+		lkl_ops->dpdkio_ops->rte_pktmbuf_attach_extbuf(seg, addr,
+							       skb_frag_size(frag),
+							       skb_frag_size(frag),
+							       noop_cb, NULL);
+	}
+
+	skb = skb_dequeue(&dpdk->sk_buff);
+	return 0;
+}
+
+static int copy_skb(struct dpdkio_dev *dpdk, struct sk_buff *skb, void *rm)
+{
+	int res = 0;
+	void *pkt = lkl_ops->dpdkio_ops->rte_pktmbuf_append(rm, skb->len);
+
+	if (!pkt) {
+		pr_warn("dpdk: rte_pktmbuf_append failed: rm: %p, skb->len: %u\n",
+		       rm, skb->len);
+		res = -1;
+		goto free;
+	}
+	skb_copy_bits(skb, 0, pkt, skb->len);
+
+free:
+	skb = skb_dequeue(&dpdk->sk_buff);
+	kfree_skb(skb);
+	return res;
+}
+
+#define DPDK_SENDING 1 /* Bit 1 = 0x02*/
+static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
+				     struct net_device *dev)
+{
+	struct dpdkio_dev *dpdk = netdev_priv(dev);
+	void *rm;
+	int n_tx;
+
+	skb_queue_tail(&dpdk->sk_buff, skb);
+
+	/* Enter critical section */
+	if (test_and_set_bit(DPDK_SENDING, &dpdk->state))
+		return NETDEV_TX_OK;
+
+	while ((skb = skb_peek(&dpdk->sk_buff)) != NULL) {
+		unsigned char *l2, *l3, *l4, *l5;
+		uint16_t ip_protocol;
+		uint64_t tso_segsz = 0;
+		struct tcphdr *tcp;
+
+		rm = lkl_ops->dpdkio_ops->rte_pktmbuf_alloc(dpdk->portid);
+		if (unlikely(rm < 0)) {
+			pr_err("failed to alloc mbuf!!\n");
+			return NETDEV_TX_OK;
+		}
+
+		l2 = skb_mac_header(skb);
+		l3 = skb_network_header(skb);
+		l4 = skb_transport_header(skb);
+
+		switch(skb->csum_offset) {
+		case offsetof(struct tcphdr, check):
+			ip_protocol = IPPROTO_TCP;
+			tcp = (struct tcphdr *)l4;
+			l5 = l4 + (tcp->doff << 2);
+
+			/* XXX: we need to negotiate offload between kernel and dpdk */
+			if (skb_shinfo(skb)->gso_size)
+				tso_segsz = skb_shinfo(skb)->gso_size;
+			else
+				tso_segsz = skb->len;
+
+			break;
+
+		case offsetof(struct udphdr, check):
+			ip_protocol = IPPROTO_UDP;
+			l5 = l4 + sizeof(struct udphdr);
+			break;
+
+		default:
+			ip_protocol = 0;
+			l5 = NULL;
+		}
+
+		lkl_ops->dpdkio_ops->tx_prep(rm, skb->protocol, ip_protocol,
+					     l3 - l2, l4 - l3,
+					     (l5) ? l5 - l4 : 0, tso_segsz,
+					     skb_is_gso(skb));
+
+		if(copy_skb(dpdk, skb, rm) < 0) {
+			printk(KERN_WARNING "dpdk: copy failed\n");
+			break;
+		}
+
+		if (unlikely(lkl_ops->dpdkio_ops->rte_eth_tx_prepare(dpdk->portid, 0, &rm, 1) !=
+			     1)) {
+			printk(KERN_WARNING "dpdk: tx_prep failed\n");
+			// FIXME: we cannot call rte_pktmbuf_free here since the inlined code makes our stack space exceed
+			lkl_ops->dpdkio_ops->rte_pktmbuf_free(rm);
+			// TODO free skb
+			break;
+		}
+		n_tx = lkl_ops->dpdkio_ops->rte_eth_tx_burst(dpdk->portid, 0, &rm, 1);
+		if (unlikely(n_tx != 1)) {
+			printk(KERN_WARNING "dpdk: tx_burst failed\n");
+			// FIXME: we cannot call rte_pktmbuf_free here since the inlined code makes our stack space exceed
+			lkl_ops->dpdkio_ops->rte_pktmbuf_free(rm);
+			// TODO free skb
+		}
+	}
+
+	clear_bit(DPDK_SENDING, &dpdk->state);
+	return NETDEV_TX_OK;
+}
+#else
 static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 				     struct net_device *dev)
 {
@@ -269,7 +439,7 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 
 	/* XXX: free TXed skbs. should it be workqueue??? */
 	dpdkio_free_tx_skb(dpdk);
-
+//#define DUMP_TX
 #ifdef DUMP_TX
  	pr_info("\n========== dump tx ==========\n");
 	skb_dump(KERN_WARNING, skb, false);
@@ -302,6 +472,7 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 
 	/* append frags */
 	data_len = skb->data_len;
+//pr_warn("data_len = %lu", data_len);
 	for (f = 0; f < skb_shinfo(skb)->nr_frags; f++) {
 		unsigned int buf_len;
 
@@ -319,8 +490,10 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 		data_len -= size;
 	}
 
+//	pr_warn("data_len = %lu", data_len);
 	if (unlikely(data_len)) {
 		net_err_ratelimited("remaining %u bytes!\n", data_len);
+		pr_err("remaining %u bytes!\n", data_len);
 		dev->stats.tx_dropped++;
 		goto out_drop;
 	}
@@ -349,7 +522,8 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 		}
 
 		dpdk->slot_batch_count = 0;
-	}
+	} else
+		pr_warn("not stopped");
 
 
 	dev->stats.tx_packets++;
@@ -363,6 +537,7 @@ out_drop:
 
 	return NETDEV_TX_OK;
 }
+#endif
 
 #define dpdkio_seg_to_page(s) pfn_to_page((s)->buf_addr >> PAGE_SHIFT)
 
@@ -615,6 +790,7 @@ static int dpdkio_init_netdev(struct net_device *dev)
 	lkl_ops->dpdkio_ops->get_macaddr(dpdk->portid, mac);
 	memcpy(dev->dev_addr, mac, dev->addr_len);
 
+	skb_queue_head_init(&dpdk->sk_buff);
 	if (!is_valid_ether_addr(dev->dev_addr)) {
 		pr_err("invalid MAC address %02x:%02x:%02x:%02x:%02x:%02x\n",
 		       mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);

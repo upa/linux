@@ -15,6 +15,7 @@ int lkl_init_dev_usrcall(char *devpath)
 		if (ret < 0)
 			return ret;
 	}
+	lkl_mount_fs("/proc");
 
 	/* find major number of misc device */
 	fd = lkl_sys_open("/proc/devices", 0, 0);
@@ -48,8 +49,6 @@ int lkl_init_dev_usrcall(char *devpath)
 
 	ret = lkl_sys_mknod(devpath, LKL_S_IFCHR | 0600,
 			    LKL_MKDEV(major, minor));
-	if (ret < 0)
-		return ret;
 
 	return 0;
 }

@@ -460,6 +460,19 @@ The following are the list of keys to describe a JSON file.
      "nameserver":"8.8.8.8"
 ```
 
+* Disk image
+
+  key: "disk_image"
+  value type: string
+
+  Specify file(s) of disk image to be mounted to an LKL instance.  The
+  key is used for the file stored in the host, the value is used as a
+  mount point at the LKL instance.
+```
+     "disk_image": "disk.img=/"
+```
+
+
 FAQ
 ===
 

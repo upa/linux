@@ -4,6 +4,7 @@
  * based on tools/lkl/lib/hijack/hijack.c by Hajime Tazaki
  */
 
+#define MINO 1
 
 #include <assert.h>
 #include <errno.h>
@@ -42,7 +43,8 @@
 #ifndef PAGE_SIZE
 /* aarch64 does not have PAGE_SIZE in header files unlike
  * x86_64-linux-gnu/sys/user.h. __PAGE_SIZE is passed from cmake */
-#define PAGE_SIZE __PAGE_SIZE
+//#define PAGE_SIZE __PAGE_SIZE
+#define PAGE_SIZE getpagesize()
 #endif
 
 int verbose;	/* for util.h */
@@ -1615,16 +1617,16 @@ struct _local_IO_jump_t
 
 struct _local_IO_FILE_plus
 {
-	_IO_FILE file;
+	struct _IO_FILE file;
 	struct _local_IO_jump_t *vtable;
 };
 
-static ssize_t _l_read(_IO_FILE *file, void *buffer, ssize_t size)
+static ssize_t _l_read(struct _IO_FILE *file, void *buffer, ssize_t size)
 {
 	return lkl_sys_read(file->_fileno, buffer, size);
 }
 
-static ssize_t _l_write(_IO_FILE *file, const void *buffer, ssize_t size)
+static ssize_t _l_write(struct _IO_FILE *file, const void *buffer, ssize_t size)
 {
 	ssize_t data_written = lkl_sys_write(file->_fileno, buffer, size);
 	if (data_written == -1)
@@ -1636,22 +1638,22 @@ static ssize_t _l_write(_IO_FILE *file, const void *buffer, ssize_t size)
 	return data_written;
 }
 
-static off_t _l_seek(_IO_FILE *file, off_t where, int whence)
+static off_t _l_seek(struct _IO_FILE *file, off_t where, int whence)
 {
 	return lkl_sys_lseek(file->_fileno, where, whence);
 }
 
-static int _l_close(_IO_FILE *file)
+static int _l_close(struct _IO_FILE *file)
 {
 	return lkl_sys_close(file->_fileno);
 }
 
-static int _l_stat(_IO_FILE *file, void *buf)
+static int _l_stat(struct _IO_FILE *file, void *buf)
 {
 	return lkl_sys_fstat(file->_fileno, (struct lkl_stat *)buf);
 }
 
-void _IO_init (_IO_FILE *fp, int flags);
+void _IO_init (struct _IO_FILE *fp, int flags);
 FILE *fdopen(int fd, const char *mode)
 {
 	FILE* (*host_fopen)(const char *, const char *) = resolve_sym("fopen");

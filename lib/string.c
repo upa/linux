@@ -106,8 +106,10 @@ EXPORT_SYMBOL(strcpy);
  * count, the remainder of @dest will be padded with %NUL.
  *
  */
+char *lkl_strncpy(char *dest, const char *src, size_t n);
 char *strncpy(char *dest, const char *src, size_t count)
 {
+	return lkl_strncpy(dest, src, count);
 	char *tmp = dest;
 
 	while (count) {

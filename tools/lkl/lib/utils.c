@@ -261,3 +261,8 @@ void lkl_sysctl_parse_write(const char *sysctls)
 		}
 	}
 }
+
+char *lkl_strncpy(char *dest, const char *src, size_t n)
+{
+	return strncpy(dest, src, n);
+}

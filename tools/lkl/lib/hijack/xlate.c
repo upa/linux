@@ -1,3 +1,4 @@
+#define _LARGEFILE64_SOURCE
 #include <errno.h>
 #define __USE_GNU
 #include <fcntl.h>
@@ -619,3 +620,42 @@ int lkl_fcntl_cmd_xlate(int cmd)
 	return cmd;
 }
 
+
+#define check_and_append(orig, new, flag)	\
+	do {					\
+		if (orig & flag) 		\
+			new |= LKL_##flag;	\
+	} while(0)
+
+int lkl_open_flag_xlate(int orig)
+{
+	int flags = 0;
+
+	check_and_append(orig, flags, O_WRONLY);
+	check_and_append(orig, flags, O_RDWR);
+	check_and_append(orig, flags, O_CREAT);
+	check_and_append(orig, flags, O_EXCL);
+	check_and_append(orig, flags, O_NOCTTY);
+	check_and_append(orig, flags, O_TRUNC);
+	check_and_append(orig, flags, O_APPEND);
+	check_and_append(orig, flags, O_NONBLOCK);
+	check_and_append(orig, flags, O_DSYNC);
+	check_and_append(orig, flags, O_DIRECT);
+	check_and_append(orig, flags, O_LARGEFILE);
+	check_and_append(orig, flags, O_DIRECTORY);
+	check_and_append(orig, flags, O_NOFOLLOW);
+	check_and_append(orig, flags, O_NOATIME);
+	check_and_append(orig, flags, O_CLOEXEC);
+
+	return flags;
+}
+
+int lkl_link_flag_xlate(int orig)
+{
+	int flags = 0;
+
+	check_and_append(orig, flags, AT_EMPTY_PATH);
+	check_and_append(orig, flags, AT_SYMLINK_FOLLOW);
+
+	return flags;
+}

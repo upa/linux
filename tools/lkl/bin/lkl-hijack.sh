@@ -14,7 +14,7 @@
 
 script_dir=$(cd $(dirname ${BASH_SOURCE:-$0}); pwd)
 
-export LD_LIBRARY_PATH=${script_dir}/../lib/hijack
+export LD_LIBRARY_PATH=${script_dir}/../lib/hijack:$LD_LIBRARY_PATH
 if [ -n ${LKL_HIJACK_DEBUG+x}  ]
 then
   trap '' TSTP

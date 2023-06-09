@@ -232,8 +232,12 @@ hijack_init(void)
 		return;
 	}
 
+	lkl_running = 1;
+
+#ifdef XXX
 	/* initialize epoll manage list */
 	memset(dual_fds, -1, sizeof(int) * LKL_FD_OFFSET);
+#endif
 
 	/* restore cpu affinity */
 	if (single_cpu_mode)

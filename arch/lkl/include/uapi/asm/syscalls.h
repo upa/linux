@@ -157,6 +157,7 @@ struct sockaddr {
 #include <linux/virtio_ring.h>
 #include <linux/pkt_sched.h>
 #include <linux/io_uring.h>
+#include <linux/utsname.h>
 
 struct user_msghdr {
 	void		__user *msg_name;	/* ptr to socket address structure */

@@ -41,7 +41,7 @@ $(OUTPUT)Makefile.conf $(OUTPUT)include/kernel_config.h $(OUTPUT)/kernel.config:
 
 -include $(OUTPUT)Makefile.conf
 
-export CFLAGS += -I$(OUTPUT)/include -Iinclude -Wall -g -O2 -Wextra \
+export CFLAGS += -I$(OUTPUT)/include -Iinclude -Wall -g -O0 -Wextra \
 	 -Wno-unused-parameter \
 	 -Wno-missing-field-initializers -fno-strict-aliasing \
 	 -Wno-cast-function-type

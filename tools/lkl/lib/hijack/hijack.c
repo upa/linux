@@ -298,8 +298,11 @@ int select(int nfds, fd_set *r, fd_set *w, fd_set *e, struct timeval *t)
 	}
 
 	/* FIXME: handle mixed case of hostfd and lklfd */
-	if (lklfds && hostfds)
+	hostfds = 0;
+	if (lklfds && hostfds) {
+		fprintf(stderr, "%s fail both fds\n", __func__);
 		return lkl_set_errno(-LKL_EOPNOTSUPP);
+	}
 
 	if (hostfds)
 		return host_select(nfds, r, w, e, t);

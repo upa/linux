@@ -1,4 +1,5 @@
-liblkl-hijack-y += hijack.o
+#liblkl-hijack-y += hijack.o
+liblkl-hijack-y += hijack-mino.o
 liblkl-hijack-y += init.o
 liblkl-hijack-y += xlate.o
 

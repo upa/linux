@@ -37,7 +37,7 @@
 #include <lkl/asm/syscalls.h>
 #include "xlate.h"
 
-//#include <mino.h>
+#include <mino.h>
 #include "util.h"
 
 #ifndef PAGE_SIZE
@@ -1165,8 +1165,11 @@ int xfstat(int fd, struct stat *statbuf)
 WRAP_CALL(__fxstat64);
 int __fxstat64(int version, int fd, struct stat *statbuf)
 {
-	return lkl_sys_fstat(fd, (struct lkl_stat *)statbuf);
-//	return __fstatat(fd, "", statbuf, LKL_AT_EMPTY_PATH);
+	long p[6] = { 0, 0, 0, 0, 0 };
+
+	p[0] = fd;
+	p[1] = (struct lkl_stat *)statbuf;
+	return rsyscall(__lkl__NR_fstat, p, 0);
 }
 
 HOOK_FD_CALL(lseek);
@@ -1623,12 +1626,24 @@ struct _local_IO_FILE_plus
 
 static ssize_t _l_read(struct _IO_FILE *file, void *buffer, ssize_t size)
 {
-	return lkl_sys_read(file->_fileno, buffer, size);
+	long p[6] = { 0, 0, 0, 0, 0 };
+
+	p[0] = file->_fileno;
+	p[1] = buffer;
+	p[2] = size;
+
+	return rsyscall(__lkl__NR_read, p, 0);
 }
 
 static ssize_t _l_write(struct _IO_FILE *file, const void *buffer, ssize_t size)
 {
-	ssize_t data_written = lkl_sys_write(file->_fileno, buffer, size);
+	long p[6] = { 0, 0, 0, 0, 0 };
+
+	p[0] = file->_fileno;
+	p[1] = buffer;
+	p[2] = size;
+
+	ssize_t data_written = rsyscall(__lkl__NR_write, p , 0);
 	if (data_written == -1)
 		return data_written;
 
@@ -1640,17 +1655,30 @@ static ssize_t _l_write(struct _IO_FILE *file, const void *buffer, ssize_t size)
 
 static off_t _l_seek(struct _IO_FILE *file, off_t where, int whence)
 {
-	return lkl_sys_lseek(file->_fileno, where, whence);
+	long p[6] = { 0, 0, 0, 0, 0 };
+
+	p[0] = file->_fileno;
+	p[1] = where;
+	p[2] = whence;
+	return rsyscall(__lkl__NR_lseek, p, 0);
 }
 
 static int _l_close(struct _IO_FILE *file)
 {
-	return lkl_sys_close(file->_fileno);
+	long p[6] = { 0, 0, 0, 0, 0 };
+
+	p[0] = file->_fileno;
+	return rsyscall(__lkl__NR_close, p, 0);
 }
 
 static int _l_stat(struct _IO_FILE *file, void *buf)
 {
-	return lkl_sys_fstat(file->_fileno, (struct lkl_stat *)buf);
+	long p[6] = { 0, 0, 0, 0, 0 };
+
+	p[0] = file->_fileno;
+	p[1] = (struct lkl_stat *)buf;
+
+	return rsyscall(__lkl__NR_fstat, p, 0);
 }
 
 void _IO_init (struct _IO_FILE *fp, int flags);
@@ -1687,7 +1715,12 @@ FILE *fdopen(int fd, const char *mode)
 	close (file->_fileno);
 	file->_fileno = fd;
 
-	fseek(file, lkl_sys_lseek(fd, 0, SEEK_CUR), SEEK_SET);
+	long p[6] = { 0, 0, 0, 0, 0 };
+
+	p[0] = fd;
+	p[1] = 0;
+	p[2] = SEEK_CUR;
+	fseek(file, rsyscall(__lkl__NR_lseek, p, 0), SEEK_SET);
 
 	return file;
 }
@@ -1726,6 +1759,8 @@ int mode_posix_flags (const char *mode)
 FILE *fopen64(const char *path, const char *mode)
 {
 	int fd = open(path, mode_posix_flags(mode));
+	long p[6] = { 0, 0, 0, 0, 0 };
+
 	if (fd == -1)
 		return 0;
 
@@ -1734,11 +1769,17 @@ FILE *fopen64(const char *path, const char *mode)
 		return 0;
 
 	if (*mode != 'a') {
-		lkl_sys_lseek(fd, 0, SEEK_SET);
+		p[0] = fd;
+		p[1] = 0;
+		p[2] = SEEK_SET;
+		rsyscall(__lkl__NR_lseek, p, 0);
 		fseek(file, 0, SEEK_SET);
 	}
 	else {
-		lkl_sys_lseek(fd, 0, SEEK_END);
+		p[0] = fd;
+		p[1] = 0;
+		p[2] = SEEK_END;
+		rsyscall(__lkl__NR_lseek, p, 0);
 		fseek(file, 0, SEEK_END);
 	}
 
@@ -1747,7 +1788,11 @@ FILE *fopen64(const char *path, const char *mode)
 
 int eventfd(unsigned int initval, int flags)
 {
-	return lkl_sys_eventfd2(initval, flags);
+	long p[6] = { 0, 0, 0, 0, 0 };
+
+	p[0] = initval;
+	p[1] = flags;
+	return rsyscall(__lkl__NR_eventfd2, p, 0);
 }
 
 ssize_t sendfile64(int out_fd, int in_fd, off_t *offset, size_t count)
@@ -1758,5 +1803,15 @@ ssize_t sendfile64(int out_fd, int in_fd, off_t *offset, size_t count)
 WRAP_CALL(uname);
 int uname(struct utsname *buf)
 {
-	return lkl_sys_uname((struct lkl_old_utsname *)buf);
+	long p[6] = { 0, 0, 0, 0, 0 };
+	p[0] = (struct lkl_old_utsname *)buf;
+	return rsyscall(__lkl__NR_uname, p, 0);
+}
+
+int newuname(struct utsname *buf)
+{
+	long p[6] = { 0, 0, 0, 0, 0 };
+
+	p[0] = (struct lkl_new_utsname *)buf;
+	return rsyscall(__lkl__NR_uname, p, 0);
 }

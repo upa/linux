@@ -952,8 +952,8 @@ ssize_t recv(int fd, void *buf, size_t len, int flags)
 	return recvfrom(fd, buf, len, flags, 0, 0);
 }
 
-WRAP_CALL(fcntl);
-int fcntl(int fd, int cmd, ...)
+WRAP_CALL(fcntl64);
+int fcntl64(int fd, int cmd, ...)
 {
 	long p[6] = { 0, 0, 0, 0, 0, 0 };
 	va_list vl;
@@ -963,7 +963,7 @@ int fcntl(int fd, int cmd, ...)
 	arg = va_arg(vl, long);
 	va_end(vl);
 
-	CHECK_CALL_WITH_FD(fd, fcntl, fd, cmd, arg);
+	CHECK_CALL_WITH_FD(fd, fcntl64, fd, cmd, arg);
 
 	p[0] = fd;
 	p[1] = lkl_fcntl_cmd_xlate(cmd);
@@ -1169,6 +1169,8 @@ int __fxstat64(int version, int fd, struct stat *statbuf)
 
 	p[0] = fd;
 	p[1] = (struct lkl_stat *)statbuf;
+
+	mrrc_update(statbuf, sizeof(*statbuf), true);
 	return rsyscall(__lkl__NR_fstat, p, 0);
 }
 
@@ -1466,6 +1468,7 @@ int mkdirat(int dirfd, const char *pathname, mode_t mode)
 	p[1] = (uintptr_t)pathname;
 	p[2] = mode;
 	size = strlen(pathname) + 1;
+	mrrc_update(pathname, size, false);
 
 	return rsyscall(__lkl__NR_mkdirat, p, size);
 }
@@ -1631,6 +1634,7 @@ static ssize_t _l_read(struct _IO_FILE *file, void *buffer, ssize_t size)
 	p[0] = file->_fileno;
 	p[1] = buffer;
 	p[2] = size;
+	mrrc_update(buffer, size, true);
 
 	return rsyscall(__lkl__NR_read, p, 0);
 }
@@ -1805,6 +1809,8 @@ int uname(struct utsname *buf)
 {
 	long p[6] = { 0, 0, 0, 0, 0 };
 	p[0] = (struct lkl_old_utsname *)buf;
+	mrrc_update(buf, sizeof(struct lkl_old_utsname), true);
+
 	return rsyscall(__lkl__NR_uname, p, 0);
 }
 
@@ -1813,5 +1819,7 @@ int newuname(struct utsname *buf)
 	long p[6] = { 0, 0, 0, 0, 0 };
 
 	p[0] = (struct lkl_new_utsname *)buf;
+	mrrc_update(buf, sizeof(struct lkl_new_utsname), true);
+
 	return rsyscall(__lkl__NR_uname, p, 0);
 }

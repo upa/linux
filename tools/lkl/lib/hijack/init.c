@@ -142,23 +142,6 @@ hijack_init(void)
 		return;
 	}
 
-	/* reflect pre-configuration */
-	lkl_load_config_pre(cfg);
-
-	/* hijack library specific configurations */
-	if (cfg->debug)
-		lkl_register_dbg_handler();
-
-	if (lkl_debug & 0x200) {
-		char c;
-
-		printf("press 'enter' to continue\n");
-		if (scanf("%c", &c) <= 0) {
-			fprintf(stderr, "scanf() fails\n");
-			return;
-		}
-	}
-
 	if (cfg->single_cpu) {
 		single_cpu_mode = atoi(cfg->single_cpu);
 		switch (single_cpu_mode) {

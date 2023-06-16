@@ -94,8 +94,6 @@ __strncpy_from_user(char *dst, const char __user *src, long count)
 	return (tmp - dst);
 }
 
-
-
 #include <asm-generic/uaccess.h>
 
 #endif

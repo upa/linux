@@ -788,7 +788,7 @@ static int dpdkio_init_netdev(struct net_device *dev)
 	dev->max_mtu = 9216;
 
 	lkl_ops->dpdkio_ops->get_macaddr(dpdk->portid, mac);
-	memcpy(dev->dev_addr, mac, dev->addr_len);
+	dev_addr_set(dev, mac);
 
 	skb_queue_head_init(&dpdk->sk_buff);
 	if (!is_valid_ether_addr(dev->dev_addr)) {

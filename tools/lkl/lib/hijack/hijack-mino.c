@@ -30,6 +30,7 @@
 #include <sys/epoll.h>
 #include <fcntl.h>
 #include <linux/stat.h>
+#include <sys/sendfile.h>
 #include <sys/sysmacros.h>
 #include <sys/utsname.h>
 
@@ -37,14 +38,28 @@
 #include <lkl/asm/syscalls.h>
 #include "xlate.h"
 
+#ifdef MINO
 #include <mino.h>
+#else
+#define mino_context_exit(x)
+#define mino_mrrc_update(a,b,c,d) 0
+
+long mino_rsyscall(struct mino_context *ctx, long no, long *arg, int size,
+		   int *err)
+{
+	int ret = lkl_set_errno(lkl_syscall(no, args));
+	if (ret < 0)
+		*err = errno;
+	return ret;
+}
+#endif	/* MINO */
+
 #include "util.h"
 
 #ifndef PAGE_SIZE
 /* aarch64 does not have PAGE_SIZE in header files unlike
  * x86_64-linux-gnu/sys/user.h. __PAGE_SIZE is passed from cmake */
-//#define PAGE_SIZE __PAGE_SIZE
-#define PAGE_SIZE getpagesize()
+#define PAGE_SIZE __PAGE_SIZE
 #endif
 
 int verbose;	/* for util.h */
@@ -138,11 +153,9 @@ __thread bool tls_hijack_enabled;
 void __attribute__((constructor(102)))
 mino_hijack_init(void)
 {
-#ifdef MINO
 	char *addr_port, *needle;
 	int write_mode = 0;
 	int v;
-#endif
 
 	tls_hijack_enabled = false;
 
@@ -151,13 +164,11 @@ mino_hijack_init(void)
 	if (getenv(ENV_MINO_VERBOSE))
 		verbose = atoi(getenv(ENV_MINO_VERBOSE));
 
-#ifdef MINO
 	if (getenv(ENV_MINO_DEBUG)) {
 		v = atoi(getenv(ENV_MINO_DEBUG));
 		if (v)
 			mino_debug_enable();
 	}
-#endif
 
 	if (getenv(ENV_MINO_EXCLUDE))
 		make_exclude_paths(getenv(ENV_MINO_EXCLUDE), hijack.paths);
@@ -167,7 +178,6 @@ mino_hijack_init(void)
 		make_exclude_paths("/tmp", hijack.paths);
 	}
 
-#ifdef MINO
 	addr_port = getenv(ENV_MINOD);
 	if (!addr_port) {
 		pr_err("%s=ADDRESS:PORT is required\n", ENV_MINOD);
@@ -205,7 +215,6 @@ mino_hijack_init(void)
 	}
 
 	pr_v1("connected to %s:%s\n", hijack.addr, hijack.port);
-#endif
 
 	tls_hijack_enabled = true;
 }
@@ -215,9 +224,7 @@ mino_hijack_fini(void)
 {
 	pr_v1("cleanup\n");
 	tls_hijack_enabled = false;
-#ifdef MINO
 	mino_context_exit(tls_ctx);
-#endif
 }
 
 /* Function for updating MRRC is wrapped by corresponding macro. This
@@ -228,11 +235,7 @@ static inline int _mrrc_update(const void *addr, size_t size, bool writable)
 {
 	if (addr == NULL)
 		return 0;
-#ifdef MINO
 	return mino_mrrc_update(tls_ctx, writable, addr, size);
-#else
-	return 0;
-#endif
 }
 #define mrrc_update(a, s, w)				\
 	do {						\
@@ -298,7 +301,6 @@ static int _mrrc_update_msghdr(const struct msghdr *msg, bool writable)
 
 static int rsyscall(long no, long *args, int size)
 {
-#ifdef MINO
 	int ret, err;
 	ret = mino_rsyscall(tls_ctx, no, args, size, &err);
 	if (unlikely(ret == MINO_RDMAERR))
@@ -306,9 +308,6 @@ static int rsyscall(long no, long *args, int size)
 
 	errno = err;
 	return ret;
-#else
-	return lkl_set_errno(lkl_syscall(no, args));
-#endif
 }
 
 
@@ -1148,6 +1147,12 @@ int __xstat(int version, const char *pathname, struct stat *statbuf)
 	return __fstatat(LKL_AT_FDCWD, pathname, statbuf, 0);
 }
 
+WRAP_CALL(__xstat64);
+int __xstat64(int version, const char *pathname, struct stat *statbuf)
+{
+	return __xstat(version, pathname, statbuf);
+}
+
 WRAP_CALL(__lxstat);
 int __lxstat(int version, const char *pathname, struct stat *statbuf)
 {
@@ -1162,13 +1167,30 @@ int xfstat(int fd, struct stat *statbuf)
 	return __fstatat(fd, "", statbuf, LKL_AT_EMPTY_PATH);
 }
 
+WRAP_CALL(__fxstat);
+int __fxstat(int version, int fd, struct stat *statbuf)
+{
+	long p[6] = { 0, 0, 0, 0, 0 };
+
+	if (!is_lklfd(fd)) {
+		CHECK_CALL_WITH_FD(fd, __fxstat, version, fd, statbuf);
+		return host___fxstat(version, fd, statbuf);
+	}
+
+	p[0] = fd;
+	p[1] = (long)statbuf;
+
+	mrrc_update(statbuf, sizeof(*statbuf), true);
+	return rsyscall(__lkl__NR_fstat, p, 0);
+}
+
 WRAP_CALL(__fxstat64);
 int __fxstat64(int version, int fd, struct stat *statbuf)
 {
 	long p[6] = { 0, 0, 0, 0, 0 };
 
 	p[0] = fd;
-	p[1] = (struct lkl_stat *)statbuf;
+	p[1] = (long)statbuf;
 
 	mrrc_update(statbuf, sizeof(*statbuf), true);
 	return rsyscall(__lkl__NR_fstat, p, 0);
@@ -1632,7 +1654,7 @@ static ssize_t _l_read(struct _IO_FILE *file, void *buffer, ssize_t size)
 	long p[6] = { 0, 0, 0, 0, 0 };
 
 	p[0] = file->_fileno;
-	p[1] = buffer;
+	p[1] = (long)buffer;
 	p[2] = size;
 	mrrc_update(buffer, size, true);
 
@@ -1644,7 +1666,7 @@ static ssize_t _l_write(struct _IO_FILE *file, const void *buffer, ssize_t size)
 	long p[6] = { 0, 0, 0, 0, 0 };
 
 	p[0] = file->_fileno;
-	p[1] = buffer;
+	p[1] = (long)buffer;
 	p[2] = size;
 
 	ssize_t data_written = rsyscall(__lkl__NR_write, p , 0);
@@ -1680,7 +1702,7 @@ static int _l_stat(struct _IO_FILE *file, void *buf)
 	long p[6] = { 0, 0, 0, 0, 0 };
 
 	p[0] = file->_fileno;
-	p[1] = (struct lkl_stat *)buf;
+	p[1] = (long)buf;
 
 	return rsyscall(__lkl__NR_fstat, p, 0);
 }
@@ -1808,7 +1830,7 @@ WRAP_CALL(uname);
 int uname(struct utsname *buf)
 {
 	long p[6] = { 0, 0, 0, 0, 0 };
-	p[0] = (struct lkl_old_utsname *)buf;
+	p[0] = (long)buf;
 	mrrc_update(buf, sizeof(struct lkl_old_utsname), true);
 
 	return rsyscall(__lkl__NR_uname, p, 0);
@@ -1818,7 +1840,7 @@ int newuname(struct utsname *buf)
 {
 	long p[6] = { 0, 0, 0, 0, 0 };
 
-	p[0] = (struct lkl_new_utsname *)buf;
+	p[0] = (long)buf;
 	mrrc_update(buf, sizeof(struct lkl_new_utsname), true);
 
 	return rsyscall(__lkl__NR_uname, p, 0);

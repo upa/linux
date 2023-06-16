@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+#include <linux/types.h>
 #include <asm/host_ops.h>
 #include <asm/kasan.h>
 

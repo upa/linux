@@ -295,7 +295,7 @@ static int zero_copy_skb(struct dpdkio_dev *dpdk, struct sk_buff *skb,
 
 	prev = (struct priv_rte_mbuf *)rm;
 	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
-		const struct skb_frag_struct *frag;
+		const struct bio_vec *frag;
 
 		seg = lkl_ops->dpdkio_ops->rte_pktmbuf_alloc(dpdk->portid);
 		if (!seg) {
@@ -308,7 +308,7 @@ static int zero_copy_skb(struct dpdkio_dev *dpdk, struct sk_buff *skb,
 
 		frag = &skb_shinfo(skb)->frags[i];
 		addr = lowmem_page_address(skb_frag_page(frag)) +
-		       frag->page_offset;
+		       frag->bv_offset;
 
 //		pr_warn("go frag, segs=%d, frg_sz=%d", ((struct priv_rte_mbuf *)rm)->nb_segs, skb_frag_size(frag));
 		lkl_ops->dpdkio_ops->rte_pktmbuf_attach_extbuf(seg, addr,

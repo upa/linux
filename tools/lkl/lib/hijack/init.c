@@ -142,10 +142,6 @@ hijack_init(void)
 		return;
 	}
 
-	ret = lkl_dpdkio_init(sizeof(ealargs) / sizeof(ealargs[0]), ealargs);
-	if (ret)
-		assert(0);
-
 	/* reflect pre-configuration */
 	lkl_load_config_pre(cfg);
 

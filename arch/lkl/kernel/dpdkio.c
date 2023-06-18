@@ -430,7 +430,7 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 {
 	struct netdev_queue *txq = skb_get_tx_queue(dev, skb);
 	struct dpdkio_dev *dpdk = netdev_priv(dev);
-	struct skb_frag_struct *frag;
+	struct bio_vec *frag;
 	struct lkl_dpdkio_slot *slot;
 	struct lkl_dpdkio_seg *seg;
 	unsigned int data_len, size, pkt_len;
@@ -479,12 +479,12 @@ static netdev_tx_t dpdkio_xmit_frame(struct sk_buff *skb,
 		seg = &slot->segs[1 + f];
 		frag = &skb_shinfo(skb)->frags[f];
 		size = skb_frag_size(frag);
-		buf_len = size + frag->page_offset;
+		buf_len = size + frag->bv_offset;
 
-		seg->buf_addr = (uintptr_t)page_address(frag->page.p);
+		seg->buf_addr = (uintptr_t)page_address(frag->bv_page);
 		seg->buf_len = (buf_len <= PAGE_SIZE) ?
 			PAGE_SIZE : (buf_len & PAGE_MASK) + PAGE_SIZE;
- 		seg->data_off = frag->page_offset;
+		seg->data_off = frag->bv_offset;
 		seg->data_len = size;
 
 		data_len -= size;

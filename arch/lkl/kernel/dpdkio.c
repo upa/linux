@@ -804,7 +804,7 @@ static int dpdkio_init_netdev(struct net_device *dev)
 
 	netif_carrier_off(dev);
 
-	netif_napi_add(dev, &dpdk->napi, dpdkio_poll, LKL_DPDKIO_MAX_BURST);
+	netif_napi_add(dev, &dpdk->napi, dpdkio_poll);
 
 	return 0;
 }

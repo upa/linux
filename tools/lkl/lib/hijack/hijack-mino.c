@@ -951,6 +951,12 @@ ssize_t recv(int fd, void *buf, size_t len, int flags)
 	return recvfrom(fd, buf, len, flags, 0, 0);
 }
 
+ssize_t __recv_chk(int fd, void *buf, size_t len,
+		   size_t __buflen, int __flags)
+{
+	return recv(fd, buf, len, __flags);
+}
+
 WRAP_CALL(fcntl64);
 int fcntl64(int fd, int cmd, ...)
 {

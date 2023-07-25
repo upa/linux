@@ -4,8 +4,8 @@
 script_dir=$(cd $(dirname ${BASH_SOURCE:-$0}); pwd)
 source $script_dir/test.sh
 
-pciname="0000:00:03.0"
-nvme_id="8086 5845"
+pciname="0000:98:00.0"
+nvme_id="8086 0953"
 bin_name="disk-vfio-pci"
 
 function wait_guest()
@@ -50,7 +50,7 @@ function run()
     else
 	lkl_test_plan 1 "disk-vfio-pci $fstype"
 	lkl_test_run 1 init
-	lkl_test_exec $MYSSH ./$bin_name -n 0000:00:03.0 -t $fstype
+	lkl_test_exec $MYSSH ./$bin_name -n ${pciname} -t $fstype
 	lkl_test_plan 1 "disk-vfio-pci $fstype"
 	lkl_test_run 1 cleanup
     fi
